@@ -1,11 +1,39 @@
+#!/usr/bin/env bash
 #!/usr/bin/env python3
+
+"""
+Multi-Monitor Desktop Notifier for AI Coding Agents (Claude Code, Codex, Antigravity)
+Renders lightweight GTK TOPLEVEL popup notifications simultaneously on all connected monitors.
+"""
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 
-PAPLAY = "/usr/bin/paplay"
+PID_FILE = "/tmp/ai_agent_notifier.pid"
+
+
+def kill_previous_instance():
+    """Ensure new notification replaces any active popup to prevent stacking."""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            if old_pid != os.getpid():
+                try:
+                    os.kill(old_pid, 0)
+                    os.kill(old_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
 
 
 def clean_text(value, limit=400):
@@ -18,23 +46,36 @@ def clean_text(value, limit=400):
 
 
 def play_sound_async(sound_path):
-    if sound_path and os.path.isfile(sound_path) and os.access(PAPLAY, os.X_OK):
-        try:
-            subprocess.Popen(
-                [PAPLAY, sound_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+    if not sound_path or not os.path.isfile(sound_path):
+        return
+
+    # Fallback list of sound players on Ubuntu / Linux
+    players = ["/usr/bin/paplay", "/usr/bin/pw-play", "/usr/bin/canberra-gtk-play", "/usr/bin/aplay"]
+    for player in players:
+        if os.access(player, os.X_OK):
+            try:
+                cmd = [player, sound_path] if player != "/usr/bin/canberra-gtk-play" else [player, "-f", sound_path]
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return
+            except Exception:
+                pass
 
 
 def show_multi_monitor_popup(app_name, title, message, timeout=0):
+    # Headless check
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return
+
     try:
         import gi
         gi.require_version("Gdk", "3.0")
         gi.require_version("Gtk", "3.0")
-        from gi.repository import Gdk, GLib, Gtk
+        gi.require_version("Pango", "1.0")
+        from gi.repository import Gdk, GLib, Gtk, Pango
     except Exception:
         return
 
@@ -44,7 +85,7 @@ def show_multi_monitor_popup(app_name, title, message, timeout=0):
             return
         n_monitors = display.get_n_monitors()
 
-        # Single elegant theme for all notifications
+        # Single elegant dark theme for all notifications
         bg_color = "#18181b"       # Modern dark slate
         border_color = "#3b82f6"   # Subtle blue accent border
         app_color = "#60a5fa"      # Light blue app header
@@ -114,11 +155,15 @@ def show_multi_monitor_popup(app_name, title, message, timeout=0):
 
             lbl_title = Gtk.Label(label=title, xalign=0)
             lbl_title.get_style_context().add_class("title")
+            lbl_title.set_ellipsize(Pango.EllipsizeMode.END)
 
             lbl_msg = Gtk.Label(label=message, xalign=0)
             lbl_msg.get_style_context().add_class("message")
             lbl_msg.set_line_wrap(True)
+            lbl_msg.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            lbl_msg.set_ellipsize(Pango.EllipsizeMode.END)
             lbl_msg.set_max_width_chars(52)
+            lbl_msg.set_lines(3)
 
             lbl_hint = Gtk.Label(label="(Click vào thông báo để tắt)", xalign=1)
             lbl_hint.get_style_context().add_class("hint")
@@ -160,11 +205,14 @@ def main():
 
     message = clean_text(args.message)
 
-    # 1. Play sound asynchronously
+    # 1. Kill previous popup instance if running
+    kill_previous_instance()
+
+    # 2. Play sound asynchronously
     if args.sound:
         play_sound_async(args.sound)
 
-    # 2. Display GTK popup on all connected monitors (Stays until clicked by default if timeout=0)
+    # 3. Display GTK popup on all connected monitors
     show_multi_monitor_popup(
         args.app_name, args.title, message, timeout=args.timeout
     )
