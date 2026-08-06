@@ -24,18 +24,17 @@ A lightweight, non-blocking multi-monitor audio-visual desktop notification syst
 
 ## Quick Start & Installation
 
-### Prerequisites
+### 1-Line Quick Installation (Recommended)
 
-Ensure required system packages are installed on Ubuntu:
+Run this single command in your terminal:
 
 ```bash
-sudo apt update
-sudo apt install -y libnotify-bin jq pulseaudio-utils sound-theme-freedesktop python3-gi
+curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash
 ```
 
-### Installation
+### Manual Installation
 
-Clone this repository and run the automated installer:
+Alternatively, clone the repository and run `install.sh`:
 
 ```bash
 git clone https://github.com/SonNX24042005/ai-agent-desktop-notifier.git
@@ -44,7 +43,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-After running `install.sh`, reload your VS Code window:
+After installation, reload your VS Code window:
 > `Ctrl + Shift + P` -> `Developer: Reload Window`
 
 ---

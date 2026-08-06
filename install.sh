@@ -9,7 +9,21 @@ CLAUDE_HOOKS="$USER_HOME/.claude/hooks"
 CODEX_DIR="$USER_HOME/.codex"
 GEMINI_HOOKS="$USER_HOME/.gemini/hooks"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_URL="https://github.com/SonNX24042005/ai-agent-desktop-notifier.git"
+
+# Determine source directory (support remote curl | bash execution)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+
+if [ ! -f "$SCRIPT_DIR/bin/multi-desktop-notify.py" ]; then
+    echo "Downloading installer from GitHub..."
+    TEMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+    git clone --depth 1 "$REPO_URL" "$TEMP_DIR/repo" &>/dev/null || {
+        echo "Error: Failed to clone repository $REPO_URL"
+        exit 1
+    }
+    SCRIPT_DIR="$TEMP_DIR/repo"
+fi
 
 echo "=== 1. Checking dependencies ==="
 MISSING_PKGS=()
@@ -47,7 +61,7 @@ chmod +x "$GEMINI_HOOKS/notify-antigravity.sh"
 
 echo "=== 4. Merging configuration files safely ==="
 python3 -c '
-import json, os, re
+import json, os
 
 USER_HOME = os.environ.get("HOME", f"/home/{os.environ.get(\"USER\")}")
 
