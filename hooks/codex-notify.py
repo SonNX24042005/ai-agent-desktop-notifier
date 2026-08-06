@@ -32,7 +32,7 @@ def send_notification(title, message, urgency="normal", sound_path=None):
                 f"--title={title}",
                 f"--message={msg}",
                 f"--urgency={urgency}",
-                "--timeout=4",
+                "--timeout=0",
             ]
             if sound_path:
                 cmd.append(f"--sound={sound_path}")

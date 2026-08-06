@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 
-"""
-Multi-Monitor Desktop Notifier for AI Coding Agents (Claude Code, Codex, Antigravity)
-Renders lightweight GTK TOPLEVEL popup notifications simultaneously on all connected monitors.
-"""
-
 import argparse
 import os
 import subprocess
@@ -34,7 +29,7 @@ def play_sound_async(sound_path):
             pass
 
 
-def show_multi_monitor_popup(app_name, title, message, timeout=4):
+def show_multi_monitor_popup(app_name, title, message, timeout=0):
     try:
         import gi
         gi.require_version("Gdk", "3.0")
@@ -55,6 +50,7 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
         app_color = "#60a5fa"      # Light blue app header
         title_color = "#ffffff"    # Pure white title text
         msg_color = "#e4e4e7"      # Light gray message text
+        hint_color = "#71717a"     # Subdued click hint text
 
         css = f"""
         window {{
@@ -76,6 +72,11 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
             color: {msg_color};
             font-size: 13px;
         }}
+        .hint {{
+            color: {hint_color};
+            font-size: 10px;
+            font-style: italic;
+        }}
         """.encode("utf-8")
 
         style_provider = Gtk.CssProvider()
@@ -88,7 +89,7 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
 
         windows = []
         win_width = 440
-        win_height = 80
+        win_height = 85
 
         for i in range(n_monitors):
             monitor = display.get_monitor(i)
@@ -102,9 +103,9 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
             win.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
             win.set_role("notification-popup")
 
-            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-            vbox.set_margin_top(10)
-            vbox.set_margin_bottom(10)
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            vbox.set_margin_top(8)
+            vbox.set_margin_bottom(8)
             vbox.set_margin_start(16)
             vbox.set_margin_end(16)
 
@@ -119,9 +120,13 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
             lbl_msg.set_line_wrap(True)
             lbl_msg.set_max_width_chars(52)
 
+            lbl_hint = Gtk.Label(label="(Click vào thông báo để tắt)", xalign=1)
+            lbl_hint.get_style_context().add_class("hint")
+
             vbox.pack_start(lbl_app, False, False, 0)
             vbox.pack_start(lbl_title, False, False, 0)
             vbox.pack_start(lbl_msg, False, False, 0)
+            vbox.pack_start(lbl_hint, False, False, 0)
 
             win.add(vbox)
             win.set_default_size(win_width, win_height)
@@ -134,7 +139,9 @@ def show_multi_monitor_popup(app_name, title, message, timeout=4):
             win.show_all()
             windows.append(win)
 
-        GLib.timeout_add_seconds(timeout, Gtk.main_quit)
+        if timeout > 0:
+            GLib.timeout_add_seconds(timeout, Gtk.main_quit)
+
         Gtk.main()
     except Exception:
         pass
@@ -147,7 +154,7 @@ def main():
     parser.add_argument("--message", default="")
     parser.add_argument("--urgency", choices=["low", "normal", "critical"], default="normal")
     parser.add_argument("--sound", default="")
-    parser.add_argument("--timeout", type=int, default=4)
+    parser.add_argument("--timeout", type=int, default=0)
 
     args = parser.parse_args()
 
@@ -157,7 +164,7 @@ def main():
     if args.sound:
         play_sound_async(args.sound)
 
-    # 2. Display GTK popup on all connected monitors simultaneously
+    # 2. Display GTK popup on all connected monitors (Stays until clicked by default if timeout=0)
     show_multi_monitor_popup(
         args.app_name, args.title, message, timeout=args.timeout
     )

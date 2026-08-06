@@ -96,7 +96,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --message="$clean_message" \
         --urgency="$urgency" \
         --sound="$sound" \
-        --timeout=4 >/dev/null 2>&1
+        --timeout=0 >/dev/null 2>&1
 fi
 
 exit 0
