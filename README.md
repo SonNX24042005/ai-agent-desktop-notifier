@@ -1,24 +1,20 @@
-# Multi-Agent Desktop Notifier for Ubuntu 🔔
+# Multi-Agent Desktop Notifier for Ubuntu
 
-A lightweight, non-blocking multi-monitor audio-visual desktop notification system for AI Coding Assistants on Ubuntu (supports **Claude Code**, **Codex**, and **Google Antigravity**).
-
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Ubuntu%20Linux-orange.svg)
-![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)
+A lightweight, non-blocking multi-monitor audio-visual desktop notification system for AI Coding Assistants on Ubuntu (supports Claude Code, Codex, and Google Antigravity).
 
 ---
 
-## ✨ Features
+## Features
 
-- **📺 Dual & Multi-Monitor Support**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of **every monitor** simultaneously.
-- **🎨 Sleek & Unified Design**: Single modern dark glassmorphism theme (`#18181b` dark slate background with `#3b82f6` blue accent border). No window titlebar, no taskbar icon, no `X` close button clutter.
-- **🔊 Sound Alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent execution loop.
-- **⚡ Safe & Non-Blocking**: Runs GTK popups and sound playback asynchronously. Any error in notification scripts will never crash or interrupt your AI CLI or IDE session.
-- **🔄 Non-Destructive Config Merger**: Preserves all your pre-existing permissions, models, MCP servers, plugins, and trusted workspace settings.
+- **Multi-Monitor Support**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
+- **Unified Design**: Single modern dark theme (`#18181b` dark slate background with `#3b82f6` blue accent border). No window titlebar, no taskbar icon, no close button clutter.
+- **Sound Alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent execution loop.
+- **Safe & Non-Blocking**: Runs GTK popups and sound playback asynchronously. Any error in notification scripts will never crash or interrupt your AI CLI or IDE session.
+- **Non-Destructive Config Merger**: Preserves all your pre-existing permissions, models, MCP servers, plugins, and trusted workspace settings.
 
 ---
 
-## 🛠 Supported AI Coding Agents
+## Supported AI Coding Agents
 
 1. **Claude Code** (via `~/.claude/settings.json` hooks)
 2. **Codex** (via `~/.codex/config.toml` `notify` & `~/.codex/hooks.json`)
@@ -26,7 +22,7 @@ A lightweight, non-blocking multi-monitor audio-visual desktop notification syst
 
 ---
 
-## 🚀 Quick Start & Installation
+## Quick Start & Installation
 
 ### Prerequisites
 
@@ -49,11 +45,11 @@ chmod +x install.sh
 ```
 
 After running `install.sh`, reload your VS Code window:
-> **`Ctrl + Shift + P`** $\rightarrow$ **`Developer: Reload Window`**
+> `Ctrl + Shift + P` -> `Developer: Reload Window`
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 ai-agent-desktop-notifier/
@@ -71,7 +67,7 @@ ai-agent-desktop-notifier/
 
 ---
 
-## 🧪 Testing Notifications Manually
+## Testing Notifications Manually
 
 You can test notifications on all your screens anytime by running:
 
@@ -88,6 +84,6 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"ask_question","tool_input":{"
 
 ---
 
-## 📜 License
+## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License.
