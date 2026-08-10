@@ -28,7 +28,7 @@ fi
 echo "=== 1. Checking dependencies ==="
 MISSING_PKGS=()
 
-for cmd in python3 jq paplay; do
+for cmd in python3 jq paplay xdotool; do
     if ! command -v "$cmd" &>/dev/null; then
         MISSING_PKGS+=("$cmd")
     fi
@@ -40,7 +40,7 @@ fi
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "WARNING: Missing dependencies: ${MISSING_PKGS[*]}"
-    echo "Please install them via: sudo apt update && sudo apt install -y libnotify-bin jq pulseaudio-utils sound-theme-freedesktop python3-gi"
+    echo "Please install them via: sudo apt update && sudo apt install -y libnotify-bin jq pulseaudio-utils sound-theme-freedesktop python3-gi xdotool"
 fi
 
 echo "=== 2. Creating target directories ==="

@@ -23,6 +23,14 @@ def clean_text(value, limit=400):
 def send_notification(title, message, urgency="normal", sound_path=None, questions_json=""):
     msg = clean_text(message)
 
+    caller_window = ""
+    try:
+        caller_window = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        caller_window = ""
+
+    caller_pid = os.getppid()
+
     if os.access(MULTI_NOTIFY, os.X_OK):
         try:
             cmd = [
@@ -32,6 +40,8 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--title={title}",
                 f"--message={msg}",
                 f"--urgency={urgency}",
+                f"--window-id={caller_window}",
+                f"--caller-pid={caller_pid}",
                 "--timeout=0",
             ]
             if sound_path:

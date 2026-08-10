@@ -91,6 +91,9 @@ if len(txt) > 400:
 print(txt)
 ' "$message" 2>/dev/null || printf '%s' "$message" | head -c 400)"
 
+caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
+caller_pid="$$"
+
 if [ -x "$MULTI_NOTIFY" ]; then
     "$PYTHON3" "$MULTI_NOTIFY" \
         --app-name="Claude Code" \
@@ -99,6 +102,8 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --questions-json="$questions_json" \
         --urgency="$urgency" \
         --sound="$sound" \
+        --window-id="$caller_window" \
+        --caller-pid="$caller_pid" \
         --timeout=0 >/dev/null 2>&1
 fi
 
