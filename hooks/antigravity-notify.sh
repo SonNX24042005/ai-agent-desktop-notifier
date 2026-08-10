@@ -24,10 +24,12 @@ message=""
 urgency="normal"
 sound=""
 
+questions_json=""
 if [ "$event_name" = "PreToolUse" ] || [ "$tool_name" = "ask_question" ] || [ "$tool_name" = "AskUserQuestion" ]; then
     urgency="critical"
     sound="$SOUND_WARNING"
     title="Antigravity: Câu hỏi"
+    questions_json="$(printf '%s' "$payload" | $JQ -c '.tool_input // {}' 2>/dev/null)"
     question="$(printf '%s' "$payload" | $JQ -r '
         if .tool_input.questions then
             .tool_input.questions | map(.question // .title // "") | join("\n")
@@ -87,6 +89,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --app-name="Antigravity" \
         --title="$title" \
         --message="$clean_message" \
+        --questions-json="$questions_json" \
         --urgency="$urgency" \
         --sound="$sound" \
         --timeout=0 >/dev/null 2>&1

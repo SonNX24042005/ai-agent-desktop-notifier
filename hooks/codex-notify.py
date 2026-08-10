@@ -20,7 +20,7 @@ def clean_text(value, limit=400):
     return text
 
 
-def send_notification(title, message, urgency="normal", sound_path=None):
+def send_notification(title, message, urgency="normal", sound_path=None, questions_json=""):
     msg = clean_text(message)
 
     if os.access(MULTI_NOTIFY, os.X_OK):
@@ -36,6 +36,8 @@ def send_notification(title, message, urgency="normal", sound_path=None):
             ]
             if sound_path:
                 cmd.append(f"--sound={sound_path}")
+            if questions_json:
+                cmd.append(f"--questions-json={questions_json}")
 
             subprocess.run(
                 cmd,
@@ -80,14 +82,17 @@ def handle_hook(payload):
                 or tool_input.get("command")
                 or "Codex đang chờ bạn cấp quyền."
             )
+            q_json = json.dumps(tool_input)
         else:
             detail = str(tool_input)
+            q_json = ""
 
         send_notification(
             f"Codex cần cấp quyền: {tool_name}",
             detail,
             urgency="critical",
             sound_path=SOUND_WARNING,
+            questions_json=q_json,
         )
     elif event == "agent-turn-complete":
         handle_completion(payload)

@@ -63,7 +63,7 @@ echo "=== 4. Merging configuration files safely ==="
 python3 -c '
 import json, os
 
-USER_HOME = os.environ.get("HOME", f"/home/{os.environ.get(\"USER\")}")
+USER_HOME = os.environ.get("HOME") or os.path.expanduser("~")
 
 # 1. Claude Code (~/.claude/settings.json)
 claude_path = os.path.join(USER_HOME, ".claude", "settings.json")

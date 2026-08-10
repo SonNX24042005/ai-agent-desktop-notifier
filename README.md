@@ -7,6 +7,12 @@ A lightweight, non-blocking multi-monitor audio-visual desktop notification syst
 ## Features
 
 - **Multi-Monitor Support**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
+- **Interactive Question Viewing & Direct Answer**: View questions directly inside the desktop notification and respond instantly without switching windows!
+  - **Single Choice**: Radio buttons for selecting one answer + custom write-in field.
+  - **Multiple Choice**: Checkboxes for selecting multiple options + custom write-in field.
+  - **Free-Text Answer**: Text entry field for custom open-ended answers.
+  - **Multi-Question Support**: Scrollable panel for answering multiple questions simultaneously.
+  - **Auto-Clipboard Sync**: Clicking "Gửi & Copy (Ctrl+Enter)" copies formatted responses directly to system clipboard for instant `Ctrl + V` pasting into your AI CLI or IDE. Saves last answer to `/tmp/ai_agent_last_answer.txt`.
 - **Unified Design**: Single modern dark theme (`#18181b` dark slate background with `#3b82f6` blue accent border). No window titlebar, no taskbar icon, no close button clutter.
 - **Sound Alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent execution loop.
 - **Safe & Non-Blocking**: Runs GTK popups and sound playback asynchronously. Any error in notification scripts will never crash or interrupt your AI CLI or IDE session.
