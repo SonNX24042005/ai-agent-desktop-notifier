@@ -20,6 +20,31 @@ def clean_text(value, limit=400):
     return text
 
 
+def find_caller_tty(start_pid):
+    """Find the pts inherited by the agent, even when the hook stdin is a pipe."""
+    pid = int(start_pid or 0)
+    visited = set()
+
+    while pid > 1 and pid not in visited:
+        visited.add(pid)
+        for fd in (0, 1, 2):
+            try:
+                tty_path = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if tty_path.startswith("/dev/pts/"):
+                return tty_path
+
+        try:
+            with open(f"/proc/{pid}/stat", "r") as stat_file:
+                parent_pid = int(stat_file.read().split()[3])
+        except (OSError, ValueError, IndexError):
+            break
+        pid = parent_pid
+
+    return ""
+
+
 def send_notification(title, message, urgency="normal", sound_path=None, questions_json=""):
     msg = clean_text(message)
 
@@ -30,6 +55,9 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
         caller_window = ""
 
     caller_pid = os.getppid()
+    caller_tty = find_caller_tty(os.getpid())
+    terminal_screen = os.environ.get("GNOME_TERMINAL_SCREEN", "")
+    project_hint = os.path.basename(os.getcwd().rstrip("/")) if os.getcwd() != "/" else ""
 
     if os.access(MULTI_NOTIFY, os.X_OK):
         try:
@@ -42,6 +70,9 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--urgency={urgency}",
                 f"--window-id={caller_window}",
                 f"--caller-pid={caller_pid}",
+                f"--project-hint={project_hint}",
+                f"--caller-tty={caller_tty}",
+                f"--terminal-screen={terminal_screen}",
                 "--timeout=6",
             ]
             if sound_path:

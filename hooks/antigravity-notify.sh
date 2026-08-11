@@ -29,12 +29,15 @@ try:
 except Exception:
     data = {}
 
+import os as _os
+
 title = "Antigravity"
 message = "Antigravity đang chờ bạn."
 urgency = "normal"
 sound = ""
 questions_json = ""
 is_pre_tool = False
+project_hint = _os.path.basename((data.get("cwd") or _os.getcwd()).rstrip("/"))
 
 tool_call = data.get("toolCall") or {}
 tool_name = tool_call.get("name") or data.get("tool_name") or ""
@@ -87,6 +90,7 @@ print(f"NOTIF_MSG={shlex.quote(message)}")
 print(f"NOTIF_URGENCY={shlex.quote(urgency)}")
 print(f"NOTIF_SOUND={shlex.quote(sound)}")
 print(f"NOTIF_QUESTIONS={shlex.quote(questions_json)}")
+print(f"NOTIF_PROJECT_HINT={shlex.quote(project_hint)}")
 if is_pre_tool:
     print("OUTPUT_JSON=\"{\\\"decision\\\": \\\"allow\\\"}\"")
 else:
@@ -95,6 +99,28 @@ else:
 
     caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
     caller_pid="$$"
+
+    find_caller_tty() {
+        local pid="$1"
+        local tty_path=""
+        local parent_pid=""
+        local fd=""
+
+        while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+            for fd in 0 1 2; do
+                tty_path="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || echo "")"
+                case "$tty_path" in
+                    /dev/pts/*) printf '%s' "$tty_path"; return 0 ;;
+                esac
+            done
+            parent_pid="$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo "")"
+            [ "$parent_pid" = "$pid" ] && break
+            pid="$parent_pid"
+        done
+    }
+
+    caller_tty="$(find_caller_tty "$caller_pid")"
+    terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
 
     if [ -x "$MULTI_NOTIFY" ]; then
         setsid "$PYTHON3" "$MULTI_NOTIFY" \
@@ -106,6 +132,9 @@ else:
             --sound="${NOTIF_SOUND:-$SOUND_COMPLETE}" \
             --window-id="$caller_window" \
             --caller-pid="$caller_pid" \
+            --project-hint="${NOTIF_PROJECT_HINT:-}" \
+            --caller-tty="$caller_tty" \
+            --terminal-screen="$terminal_screen" \
             --timeout=6 </dev/null >/dev/null 2>&1 &
         disown
     fi

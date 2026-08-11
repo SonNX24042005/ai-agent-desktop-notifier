@@ -90,8 +90,32 @@ if len(txt) > 400:
 print(txt)
 ' "$message" 2>/dev/null || printf '%s' "$message" | head -c 400)"
 
+find_caller_tty() {
+    local pid="$1"
+    local tty_path=""
+    local parent_pid=""
+    local fd=""
+
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+        for fd in 0 1 2; do
+            tty_path="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || echo "")"
+            case "$tty_path" in
+                /dev/pts/*) printf '%s' "$tty_path"; return 0 ;;
+            esac
+        done
+        parent_pid="$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo "")"
+        [ "$parent_pid" = "$pid" ] && break
+        pid="$parent_pid"
+    done
+}
+
 caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
 caller_pid="$$"
+caller_tty="$(find_caller_tty "$caller_pid")"
+terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
+cwd_path="$(printf '%s' "$payload" | $JQ -r '.cwd // ""' 2>/dev/null)"
+project_hint=""
+[ -n "$cwd_path" ] && project_hint="$(basename "$cwd_path" 2>/dev/null)"
 
 if [ -x "$MULTI_NOTIFY" ]; then
     setsid "$PYTHON3" "$MULTI_NOTIFY" \
@@ -103,6 +127,9 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --sound="$sound" \
         --window-id="$caller_window" \
         --caller-pid="$caller_pid" \
+        --project-hint="$project_hint" \
+        --caller-tty="$caller_tty" \
+        --terminal-screen="$terminal_screen" \
         --timeout=6 </dev/null >/dev/null 2>&1 &
     disown
 fi

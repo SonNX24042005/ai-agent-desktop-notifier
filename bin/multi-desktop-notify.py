@@ -13,8 +13,10 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
+import time
 
 PID_FILE = "/tmp/ai_agent_notifier.pid"
 
@@ -81,23 +83,234 @@ def is_valid_toplevel_window(wid):
         return False
 
 
-def find_target_window(window_id_arg="", caller_pid=None):
+def find_window_title(wid):
+    try:
+        return subprocess.check_output(["xdotool", "getwindowname", str(wid)], stderr=subprocess.DEVNULL).decode().strip().lower()
+    except Exception:
+        return ""
+
+
+def write_terminal_control(tty_path, sequence):
+    """Write a terminal control sequence only to a real pts device."""
+    if not tty_path or not str(tty_path).startswith("/dev/pts/"):
+        return False
+
+    try:
+        tty_stat = os.stat(tty_path)
+        if not stat.S_ISCHR(tty_stat.st_mode):
+            return False
+        fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
+        try:
+            os.write(fd, sequence.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except Exception:
+        return False
+
+
+def find_marker_window(marker):
+    try:
+        result = subprocess.check_output(
+            ["xdotool", "search", "--name", marker],
+            stderr=subprocess.DEVNULL,
+        )
+        for wid in result.decode().splitlines():
+            wid = wid.strip()
+            if is_valid_toplevel_window(wid):
+                return wid
+    except Exception:
+        pass
+    return ""
+
+
+def gnome_terminal_window_states():
+    """Return (D-Bus window path, active tab index) pairs for GNOME Terminal."""
+    try:
+        output = subprocess.check_output(
+            [
+                "gdbus",
+                "introspect",
+                "--session",
+                "--dest",
+                "org.gnome.Terminal",
+                "--object-path",
+                "/org/gnome/Terminal/window",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=0.5,
+        ).decode()
+    except Exception:
+        return []
+
+    paths = []
+    for line in output.splitlines():
+        match = re.match(r"\s*node ([0-9]+) \{", line)
+        if match:
+            paths.append(f"/org/gnome/Terminal/window/{match.group(1)}")
+
+    states = []
+    for path in paths:
+        try:
+            describe = subprocess.check_output(
+                [
+                    "gdbus",
+                    "call",
+                    "--session",
+                    "--dest",
+                    "org.gnome.Terminal",
+                    "--object-path",
+                    path,
+                    "--method",
+                    "org.gtk.Actions.Describe",
+                    "active-tab",
+                ],
+                stderr=subprocess.DEVNULL,
+                timeout=0.5,
+            ).decode()
+            match = re.search(r"\(\((true|false), signature 'i', \[<([0-9]+)>\]", describe)
+            if match and match.group(1) == "true":
+                states.append((path, int(match.group(2))))
+        except Exception:
+            continue
+    return states
+
+
+def activate_gnome_terminal_tab(window_path, tab_index):
+    try:
+        subprocess.run(
+            [
+                "gdbus",
+                "call",
+                "--session",
+                "--dest",
+                "org.gnome.Terminal",
+                "--object-path",
+                window_path,
+                "--method",
+                "org.gtk.Actions.Activate",
+                "active-tab",
+                f"[<{tab_index}>]",
+                "{}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=0.5,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def find_gnome_terminal_tab_window(marker):
+    """Select the GNOME Terminal tab carrying marker and return its X11 window."""
+    states = gnome_terminal_window_states()
+    if not states:
+        return ""
+
+    target_path = ""
+    target_window = ""
+    try:
+        for window_path, original_index in states:
+            # GNOME's built-in tab shortcuts support at least ten tabs. Trying
+            # a bounded range also works for windows with more tabs: invalid
+            # indices are harmless no-ops.
+            for tab_index in range(10):
+                activate_gnome_terminal_tab(window_path, tab_index)
+                time.sleep(0.06)
+                target_window = find_marker_window(marker)
+                if target_window:
+                    target_path = window_path
+                    return target_window
+    finally:
+        # Keep the source tab selected when found; restore every tab touched
+        # during the scan so unrelated terminal windows are not changed.
+        for window_path, original_index in states:
+            if window_path != target_path:
+                activate_gnome_terminal_tab(window_path, original_index)
+
+    return ""
+
+
+def find_window_by_tty(tty_path, terminal_screen=""):
+    """
+    Resolves a GNOME Terminal window from the agent's controlling pts.
+
+    GNOME Terminal puts all tabs/windows under one server PID, so
+    ``xdotool search --pid`` cannot distinguish them. VTE supports a title
+    stack; use a unique temporary title to identify the X11 window, then pop
+    the original title back immediately.
+    """
+    if not tty_path or not str(tty_path).startswith("/dev/pts/"):
+        return ""
+
+    marker = f"AI_NOTIFY_{os.getpid()}_{time.monotonic_ns()}"
+    pushed_title = write_terminal_control(tty_path, f"\x1b[22;0t\x1b]0;{marker}\x07")
+    if not pushed_title:
+        return ""
+
+    try:
+        deadline = time.monotonic() + 0.75
+        while time.monotonic() < deadline:
+            marker_window = find_marker_window(marker)
+            if marker_window:
+                return marker_window
+            time.sleep(0.05)
+
+        # A marker in a hidden tab is not reflected in the parent window title.
+        # When the hook inherited GNOME_TERMINAL_SCREEN, briefly select tabs via
+        # the GNOME Terminal action API to locate that hidden tab as well.
+        if terminal_screen.startswith("/org/gnome/Terminal/screen/"):
+            marker_window = find_gnome_terminal_tab_window(marker)
+            if marker_window:
+                return marker_window
+    finally:
+        # Restore the title saved by VTE's title stack. This keeps the lookup
+        # invisible to the user even when the terminal is not focused.
+        write_terminal_control(tty_path, "\x1b[23;0t")
+
+    return ""
+
+
+def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen=""):
     """
     Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
     that triggered the notification.
     """
-    # 1. Walk up PID tree from caller_pid to find window owning the process
+    # 1. Resolve a GNOME Terminal window from its unique controlling TTY.
+    #    This must happen before PID walking: one gnome-terminal-server owns
+    #    every terminal window and tab in the session.
+    tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
+    if tty_window:
+        return tty_window
+
+    # 2. Walk up PID tree from caller_pid to find window owning the process
     curr_pid = caller_pid if caller_pid else os.getppid()
     visited = set()
+
+    active_hint = str(window_id_arg).strip() if window_id_arg and str(window_id_arg).strip().isdigit() else ""
+    project_hint = (project_hint or "").strip().lower()
 
     while curr_pid and curr_pid > 1 and curr_pid not in visited:
         visited.add(curr_pid)
         try:
             res = subprocess.check_output(["xdotool", "search", "--pid", str(curr_pid)], stderr=subprocess.DEVNULL)
             wids = [w.strip() for w in res.decode().splitlines() if w.strip()]
-            for wid in wids:
-                if is_valid_toplevel_window(wid):
-                    return wid
+            candidates = [wid for wid in wids if is_valid_toplevel_window(wid)]
+            if candidates:
+                # Multi-window apps (e.g. VS Code) share one PID across all their
+                # windows, so PID alone can't tell them apart. The "active window
+                # at hook time" hint is useless once the user has switched away
+                # (which is exactly when they need the notification), so prefer
+                # matching the project/folder name (from cwd) against window
+                # titles first - that stays correct regardless of current focus.
+                if project_hint and len(candidates) > 1:
+                    for wid in candidates:
+                        if project_hint in find_window_title(wid):
+                            return wid
+                if active_hint and active_hint in candidates:
+                    return active_hint
+                return candidates[0]
         except Exception:
             pass
 
@@ -108,13 +321,13 @@ def find_target_window(window_id_arg="", caller_pid=None):
         except Exception:
             break
 
-    # 2. Fallback to explicit window_id_arg if valid toplevel
+    # 3. Fallback to explicit window_id_arg if valid toplevel
     if window_id_arg and str(window_id_arg).strip().isdigit():
         wid = str(window_id_arg).strip()
         if is_valid_toplevel_window(wid):
             return wid
 
-    # 3. Fallback to active window if valid toplevel
+    # 4. Fallback to active window if valid toplevel
     try:
         res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
         active_wid = res.decode().strip()
@@ -433,6 +646,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--window-id", default="")
     parser.add_argument("--caller-pid", type=int, default=0)
+    parser.add_argument("--project-hint", default="")
+    parser.add_argument("--caller-tty", default="")
+    parser.add_argument("--terminal-screen", default="")
 
     args = parser.parse_args()
 
@@ -442,7 +658,13 @@ def main():
     kill_previous_instance()
 
     # 2. Find target window to focus
-    target_window_id = find_target_window(window_id_arg=args.window_id, caller_pid=args.caller_pid)
+    target_window_id = find_target_window(
+        window_id_arg=args.window_id,
+        caller_pid=args.caller_pid,
+        project_hint=args.project_hint,
+        caller_tty=args.caller_tty,
+        terminal_screen=args.terminal_screen,
+    )
 
     # 3. Play sound asynchronously
     if args.sound:
