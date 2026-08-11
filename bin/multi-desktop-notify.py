@@ -436,10 +436,14 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         msg_color = "#e4e4e7"       # Zinc 200 message
 
         css = f"""
-        window {{
+        window.notification-window {{
+            background-color: transparent;
+            border: none;
+        }}
+        .notification-card {{
             background-color: {bg_color};
             border: 1.5px solid {border_color};
-            border-radius: 12px;
+            border-radius: 14px;
         }}
         .banner-box {{
             padding: 12px 16px;
@@ -524,6 +528,13 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
             win.set_decorated(False)
+            win.get_style_context().add_class("notification-window")
+            win.set_app_paintable(True)
+            screen = win.get_screen()
+            if screen:
+                visual = screen.get_rgba_visual()
+                if visual:
+                    win.set_visual(visual)
             win.set_keep_above(True)
             win.set_skip_taskbar_hint(True)
             win.set_skip_pager_hint(True)
@@ -532,6 +543,8 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             # EventBox to capture clicks anywhere on the banner
             event_box = Gtk.EventBox()
+            event_box.set_visible_window(True)
+            event_box.get_style_context().add_class("notification-card")
             event_box.connect("button-press-event", lambda w, e: handle_focus_and_close())
 
             vbox_main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
