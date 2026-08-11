@@ -130,7 +130,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --project-hint="$project_hint" \
         --caller-tty="$caller_tty" \
         --terminal-screen="$terminal_screen" \
-        --timeout=6 </dev/null >/dev/null 2>&1 &
+        --timeout=0 </dev/null >/dev/null 2>&1 &
     disown
 fi
 

@@ -73,7 +73,7 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--project-hint={project_hint}",
                 f"--caller-tty={caller_tty}",
                 f"--terminal-screen={terminal_screen}",
-                "--timeout=6",
+                "--timeout=0",
             ]
             if sound_path:
                 cmd.append(f"--sound={sound_path}")

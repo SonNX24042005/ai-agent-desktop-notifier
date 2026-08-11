@@ -135,7 +135,7 @@ else:
             --project-hint="${NOTIF_PROJECT_HINT:-}" \
             --caller-tty="$caller_tty" \
             --terminal-screen="$terminal_screen" \
-            --timeout=6 </dev/null >/dev/null 2>&1 &
+            --timeout=0 </dev/null >/dev/null 2>&1 &
         disown
     fi
 fi
