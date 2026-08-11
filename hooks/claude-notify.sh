@@ -59,12 +59,11 @@ elif [ "$notif_type" = "permission_prompt" ] || [ "$event_name" = "PermissionReq
     ' 2>/dev/null)"
     message="$detail"
 
-elif [ "$notif_type" = "agent_completed" ]; then
+elif [ "$notif_type" = "agent_completed" ] || [ "$event_name" = "Stop" ]; then
     urgency="normal"
     sound="$SOUND_COMPLETE"
     title="Claude Code: Hoàn thành"
-    msg="$(printf '%s' "$payload" | $JQ -r '.message // .last_assistant_message // "Claude đã hoàn thành công việc."' 2>/dev/null)"
-    message="$msg"
+    message="Claude đã hoàn thành trả lời."
 
 elif [ "$notif_type" = "agent_needs_input" ] || [ "$notif_type" = "idle_prompt" ]; then
     urgency="critical"
@@ -95,7 +94,7 @@ caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
 caller_pid="$$"
 
 if [ -x "$MULTI_NOTIFY" ]; then
-    "$PYTHON3" "$MULTI_NOTIFY" \
+    setsid "$PYTHON3" "$MULTI_NOTIFY" \
         --app-name="Claude Code" \
         --title="$title" \
         --message="$clean_message" \
@@ -104,7 +103,8 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --sound="$sound" \
         --window-id="$caller_window" \
         --caller-pid="$caller_pid" \
-        --timeout=0 >/dev/null 2>&1
+        --timeout=6 </dev/null >/dev/null 2>&1 &
+    disown
 fi
 
 exit 0

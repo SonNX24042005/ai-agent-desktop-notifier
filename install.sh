@@ -8,6 +8,7 @@ LOCAL_BIN="$USER_HOME/.local/bin"
 CLAUDE_HOOKS="$USER_HOME/.claude/hooks"
 CODEX_DIR="$USER_HOME/.codex"
 GEMINI_HOOKS="$USER_HOME/.gemini/hooks"
+GEMINI_CONFIG="$USER_HOME/.gemini/config"
 
 REPO_URL="https://github.com/SonNX24042005/ai-agent-desktop-notifier.git"
 
@@ -44,7 +45,7 @@ if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
 fi
 
 echo "=== 2. Creating target directories ==="
-mkdir -p "$LOCAL_BIN" "$CLAUDE_HOOKS" "$CODEX_DIR" "$GEMINI_HOOKS"
+mkdir -p "$LOCAL_BIN" "$CLAUDE_HOOKS" "$CODEX_DIR" "$GEMINI_HOOKS" "$GEMINI_CONFIG"
 
 echo "=== 3. Copying notification scripts ==="
 cp "$SCRIPT_DIR/bin/multi-desktop-notify.py" "$LOCAL_BIN/multi-desktop-notify.py"
@@ -68,8 +69,11 @@ USER_HOME = os.environ.get("HOME") or os.path.expanduser("~")
 # 1. Claude Code (~/.claude/settings.json)
 claude_path = os.path.join(USER_HOME, ".claude", "settings.json")
 if os.path.exists(claude_path):
-    with open(claude_path, "r") as f:
-        cdata = json.load(f)
+    try:
+        with open(claude_path, "r") as f:
+            cdata = json.load(f)
+    except Exception:
+        cdata = {}
     cdata["hooks"] = {
         "PreToolUse": [
             {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
@@ -79,6 +83,9 @@ if os.path.exists(claude_path):
             {"matcher": "idle_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
             {"matcher": "agent_needs_input", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
             {"matcher": "agent_completed", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
+        ],
+        "Stop": [
+            {"hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
         ]
     }
     with open(claude_path, "w") as f:
@@ -123,29 +130,45 @@ with open(codex_hooks, "w") as f:
     json.dump(data_hooks, f, indent=2)
 print("✓ Merged Codex hooks.json")
 
-# 3. Antigravity (~/.gemini/settings.json & ~/.gemini/antigravity-cli/settings.json)
-for path in [
-    os.path.join(USER_HOME, ".gemini", "settings.json"),
-    os.path.join(USER_HOME, ".gemini", "antigravity-cli", "settings.json")
-]:
-    if os.path.exists(path):
-        with open(path, "r") as f:
+# 3. Antigravity (~/.gemini/config/hooks.json)
+gemini_config_dir = os.path.join(USER_HOME, ".gemini", "config")
+os.makedirs(gemini_config_dir, exist_ok=True)
+gemini_hooks_file = os.path.join(gemini_config_dir, "hooks.json")
+
+gdata = {}
+if os.path.exists(gemini_hooks_file):
+    try:
+        with open(gemini_hooks_file, "r") as f:
             gdata = json.load(f)
-        gdata["hooks"] = {
-            "PreToolUse": [
-                {"matcher": "ask_question", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]},
-                {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]}
-            ],
-            "Notification": [
-                {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]},
-                {"matcher": "idle_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]},
-                {"matcher": "agent_needs_input", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]},
-                {"matcher": "agent_completed", "hooks": [{"type": "command", "command": f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"}]}
+    except Exception:
+        gdata = {}
+
+hook_cmd = f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"
+gdata["desktop-notifier"] = {
+    "PreToolUse": [
+        {
+            "matcher": "ask_question|AskUserQuestion",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": hook_cmd,
+                    "timeout": 10
+                }
             ]
         }
-        with open(path, "w") as f:
-            json.dump(gdata, f, indent=2)
-        print(f"✓ Merged Antigravity {path}")
+    ],
+    "Stop": [
+        {
+            "type": "command",
+            "command": hook_cmd,
+            "timeout": 10
+        }
+    ]
+}
+
+with open(gemini_hooks_file, "w") as f:
+    json.dump(gdata, f, indent=2)
+print("✓ Merged Antigravity hooks.json (~/.gemini/config/hooks.json)")
 '
 
 echo "=== 5. Installation Complete! ==="

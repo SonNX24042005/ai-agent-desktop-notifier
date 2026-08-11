@@ -42,18 +42,19 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--urgency={urgency}",
                 f"--window-id={caller_window}",
                 f"--caller-pid={caller_pid}",
-                "--timeout=0",
+                "--timeout=6",
             ]
             if sound_path:
                 cmd.append(f"--sound={sound_path}")
             if questions_json:
                 cmd.append(f"--questions-json={questions_json}")
 
-            subprocess.run(
+            subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                check=False,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
             )
             return
         except Exception:
@@ -65,15 +66,9 @@ def handle_completion(payload):
     if msg_type != "agent-turn-complete":
         return
 
-    message = (
-        payload.get("last-assistant-message")
-        or payload.get("message")
-        or "Codex đã hoàn thành lượt làm việc."
-    )
-
     send_notification(
         "Codex đã hoàn thành",
-        message,
+        "Codex đã hoàn thành lượt làm việc.",
         urgency="normal",
         sound_path=SOUND_COMPLETE,
     )

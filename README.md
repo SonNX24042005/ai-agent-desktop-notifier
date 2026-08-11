@@ -19,7 +19,7 @@ A lightweight, non-blocking multi-monitor audio-visual desktop notification syst
 
 1. **Claude Code** (via `~/.claude/settings.json` hooks)
 2. **Codex** (via `~/.codex/config.toml` `notify` & `~/.codex/hooks.json`)
-3. **Google Antigravity** (via `~/.gemini/settings.json` & `~/.gemini/antigravity-cli/settings.json` hooks)
+3. **Google Antigravity** (via `~/.gemini/config/hooks.json` lifecycle hooks)
 
 ---
 
@@ -78,8 +78,11 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input"
 # Test Codex completion notification
 ~/.codex/notify.py '{"type":"agent-turn-complete","last-assistant-message":"Codex completed task!"}'
 
-# Test Antigravity notification
-echo '{"hook_event_name":"PreToolUse","tool_name":"ask_question","tool_input":{"questions":[{"question":"Antigravity test on all screens!"}]}}' | ~/.gemini/hooks/notify-antigravity.sh
+# Test Antigravity question notification
+echo '{"toolCall":{"name":"ask_question","args":{"questions":[{"question":"Antigravity test on all screens!"}]}}}' | ~/.gemini/hooks/notify-antigravity.sh
+
+# Test Antigravity completion notification
+echo '{"terminationReason":"model_stop"}' | ~/.gemini/hooks/notify-antigravity.sh
 ```
 
 ---
