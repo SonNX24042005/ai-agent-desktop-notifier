@@ -67,30 +67,28 @@ def play_sound_async(sound_path):
                 pass
 
 
+def is_valid_toplevel_window(wid):
+    """
+    Checks if WID is a valid managed toplevel window (has _NET_WM_STATE property).
+    Filters out internal non-toplevel container windows.
+    """
+    if not wid or not str(wid).strip().isdigit():
+        return False
+    try:
+        out = subprocess.check_output(["xprop", "-id", str(wid).strip(), "_NET_WM_STATE"], stderr=subprocess.DEVNULL).decode()
+        return "_NET_WM_STATE" in out and "not found" not in out
+    except Exception:
+        return False
+
+
 def find_target_window(window_id_arg="", caller_pid=None):
     """
-    Finds the exact X11 window ID for the application (VS Code / Terminal)
+    Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
     that triggered the notification.
     """
-    if window_id_arg and str(window_id_arg).strip().isdigit():
-        wid = str(window_id_arg).strip()
-        try:
-            name = subprocess.check_output(["xdotool", "getwindowname", wid], stderr=subprocess.DEVNULL).decode().strip()
-            if name:
-                return wid
-        except Exception:
-            pass
-
-    active_wid = None
-    try:
-        res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
-        active_wid = res.decode().strip()
-    except Exception:
-        pass
-
+    # 1. Walk up PID tree from caller_pid to find window owning the process
     curr_pid = caller_pid if caller_pid else os.getppid()
     visited = set()
-    best_wid = None
 
     while curr_pid and curr_pid > 1 and curr_pid not in visited:
         visited.add(curr_pid)
@@ -98,17 +96,8 @@ def find_target_window(window_id_arg="", caller_pid=None):
             res = subprocess.check_output(["xdotool", "search", "--pid", str(curr_pid)], stderr=subprocess.DEVNULL)
             wids = [w.strip() for w in res.decode().splitlines() if w.strip()]
             for wid in wids:
-                try:
-                    name = subprocess.check_output(["xdotool", "getwindowname", wid], stderr=subprocess.DEVNULL).decode().strip()
-                    if name and name != "code":
-                        return wid
-                    if not best_wid:
-                        best_wid = wid
-                except Exception:
-                    if not best_wid:
-                        best_wid = wid
-            if best_wid:
-                return best_wid
+                if is_valid_toplevel_window(wid):
+                    return wid
         except Exception:
             pass
 
@@ -119,15 +108,27 @@ def find_target_window(window_id_arg="", caller_pid=None):
         except Exception:
             break
 
-    if active_wid and active_wid.isdigit():
-        return active_wid
+    # 2. Fallback to explicit window_id_arg if valid toplevel
+    if window_id_arg and str(window_id_arg).strip().isdigit():
+        wid = str(window_id_arg).strip()
+        if is_valid_toplevel_window(wid):
+            return wid
 
-    return best_wid
+    # 3. Fallback to active window if valid toplevel
+    try:
+        res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
+        active_wid = res.decode().strip()
+        if active_wid and is_valid_toplevel_window(active_wid):
+            return active_wid
+    except Exception:
+        pass
+
+    return ""
 
 
 def focus_target_window(window_id):
     """
-    Activates and brings to front the specified window ID using xdotool.
+    Activates and brings to front the specified window ID using xdotool / wmctrl.
     """
     if not window_id:
         return False
@@ -135,11 +136,17 @@ def focus_target_window(window_id):
         subprocess.Popen(["xdotool", "windowactivate", "--sync", str(window_id)], stderr=subprocess.DEVNULL)
         return True
     except Exception:
-        try:
-            subprocess.Popen(["xdotool", "windowraise", str(window_id)], stderr=subprocess.DEVNULL)
-            return True
-        except Exception:
-            return False
+        pass
+    try:
+        subprocess.Popen(["xdotool", "windowraise", str(window_id)], stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        pass
+    try:
+        subprocess.Popen(["wmctrl", "-i", "-a", str(window_id)], stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
 
 
 def extract_summary_from_payload(questions_json_raw, fallback_message):
