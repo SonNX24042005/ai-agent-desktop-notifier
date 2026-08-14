@@ -151,6 +151,13 @@ if os.path.exists(gemini_hooks_file):
 
 hook_cmd = f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"
 gdata["desktop-notifier"] = {
+    "PreInvocation": [
+        {
+            "type": "command",
+            "command": hook_cmd,
+            "timeout": 5
+        }
+    ],
     "PreToolUse": [
         {
             "matcher": "ask_question|AskUserQuestion",

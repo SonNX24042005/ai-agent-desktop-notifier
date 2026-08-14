@@ -35,6 +35,18 @@ if [[ "$payload" == *"Initializing imported session history"* ]]; then
     exit 0
 fi
 
+# 1.5 Early session capture on PreInvocation (0ms execution in background)
+if [[ "$payload" == *"invocationNum"* ]] || [[ "$payload" == *"PreInvocation"* ]]; then
+    session_id="$(echo "$payload" | grep -o '"conversationId": *"[^"]*"' | head -n1 | cut -d'"' -f4)"
+    if [ -n "$session_id" ] && [ -x "$MULTI_NOTIFY" ]; then
+        caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
+        "$PYTHON3" "$MULTI_NOTIFY" --capture-session --session-id="$session_id" --window-id="$caller_window" &>/dev/null &
+        disown
+    fi
+    echo "{}"
+    exit 0
+fi
+
 # 2. Fast-path: If it is a toolCall but NOT a question tool, immediately allow and exit (0ms)
 if [[ "$payload" == *"toolCall"* ]]; then
     if [[ "$payload" != *"ask_question"* ]] && [[ "$payload" != *"AskUserQuestion"* ]] && [[ "$payload" != *"ask_user"* ]]; then
