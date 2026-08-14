@@ -148,13 +148,13 @@ if os.path.exists(gemini_settings_file):
     if "hooks" not in sdata:
         sdata["hooks"] = {}
     sdata["hooks"]["PreInvocation"] = [
-        {"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}
+        {"type": "command", "command": hook_cmd, "timeout": 5}
     ]
     sdata["hooks"]["PreToolUse"] = [
         {"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
     ]
     sdata["hooks"]["Stop"] = [
-        {"hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
+        {"type": "command", "command": hook_cmd, "timeout": 10}
     ]
     sdata["hooks"]["Notification"] = [
         {"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
