@@ -1,42 +1,47 @@
-# Multi-Agent Desktop Notifier for Ubuntu
+# Multi-agent desktop notifier for Ubuntu
 
-A lightweight, non-blocking multi-monitor audio-visual desktop notification system for AI Coding Assistants on Ubuntu (supports Claude Code, Codex, and Google Antigravity).
+A lightweight, non-blocking multi-monitor audio-visual desktop notification and window-focusing system for AI coding assistants on Ubuntu Linux (supports Claude Code, OpenAI Codex, and Google Antigravity).
 
 ---
 
 ## Features
 
-- **Multi-Monitor Support**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
-- **Session-Based Early Window Capture**: Records and caches the exact workspace window at session start (`SessionStart`) with PID ancestry verification, ensuring 100% focus precision even when you switch to other applications or workspaces during long-running tasks.
-- **Direct App Window Focus**: Clicking anywhere on the notification banner or clicking the **"Đến cửa sổ ứng dụng"** button instantly focuses and brings to front the exact workspace window (e.g. the specific VS Code or terminal window out of multiple open instances) that triggered the notification.
-- **Smart Anti-Spam Deduplication**: Automatically deduplicates consecutive identical notifications within a cooldown period to prevent UI flicker.
-- **Multi-Channel Webhooks (Optional)**: Supports forwarding alerts to mobile channels (Feishu, DingTalk, Slack, Discord, Bark, ntfy) via `~/.config/ai-agent-notifier/config.json`.
-- **Unified Clean Design**: Modern dark theme (`#18181b` dark slate background with `#3b82f6` blue accent border). Compact notification layout without heavy form clutter.
-- **Sound Alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent execution loop.
-- **Safe & Non-Blocking**: Runs GTK popups and sound playback asynchronously. Any error in notification scripts will never crash or interrupt your AI CLI or IDE session.
-- **Non-Destructive Config Merger**: Preserves all your pre-existing permissions, models, MCP servers, plugins, and trusted workspace settings.
+- **Multi-monitor display**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
+- **Session-based early window capture**: Records and caches the exact workspace window at session start (`SessionStart`) with PID ancestry verification, ensuring 100% focus precision even when you switch to other applications or workspaces during long-running tasks.
+- **Hierarchical window resolution (6 tiers)**: Accurately identifies the target workspace among multiple open instances:
+  - Tier 0: Session cache (`session_id` lookup)
+  - Tier 1: Process ancestry tree (`/proc/{pid}/stat`) + project directory hint
+  - Tier 2: Workspace title matching across open IDE / terminal windows
+  - Tier 3: Terminal pts device control (VTE title stack push & pop marker) + GNOME Terminal D-Bus tab switching
+  - Tier 4: Explicit caller window ID
+  - Tier 5: Fallback active window
+- **Direct app window focus**: Clicking anywhere on the notification banner or clicking the **"Đến cửa sổ ứng dụng"** button instantly focuses and brings to front the exact workspace window via native GDK and X11/EWMH (`_NET_ACTIVE_WINDOW`).
+- **Smart anti-spam deduplication**: Deduplicates identical notifications within a configurable cooldown period (`--dedupe-seconds`, default 2s) to prevent UI flicker.
+- **Multi-channel webhooks (optional)**: Forwards notifications to mobile channels (Feishu/Lark, DingTalk, Slack, Discord, Bark iOS, ntfy) via `~/.config/ai-agent-notifier/config.json`.
+- **Audio alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent loop.
+- **Non-destructive config merger**: Automatically updates hook configurations while preserving all pre-existing permissions, models, MCP servers, plugins, and trusted workspace settings.
 
 ---
 
-## Supported AI Coding Agents
+## Supported AI coding agents
 
-1. **Claude Code** (via `~/.claude/settings.json` hooks)
-2. **Codex** (via `~/.codex/config.toml` `notify` & `~/.codex/hooks.json`)
+1. **Claude Code** (via `~/.claude/settings.json` lifecycle hooks)
+2. **OpenAI Codex** (via `~/.codex/config.toml` `notify` & `~/.codex/hooks.json`)
 3. **Google Antigravity** (via `~/.gemini/config/hooks.json` lifecycle hooks)
 
 ---
 
-## Quick Start & Installation
+## Quick start & installation
 
-### 1-Line Quick Installation (Recommended)
+### 1-line quick installation (recommended)
 
-Run this single command in your terminal:
+Run this command in your terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash
 ```
 
-### Manual Installation
+### Manual installation
 
 Alternatively, clone the repository and run `install.sh`:
 
@@ -52,31 +57,103 @@ After installation, reload your VS Code window:
 
 ---
 
-## Repository Structure
+## Updating the notification system
+
+You can update the notification system anytime using any of the following methods:
+
+### Method 1: Run update script from repository
+
+```bash
+./update.sh
+```
+
+### Method 2: 1-line update via curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash
+```
+
+### Method 3: Using the `--update` flag
+
+```bash
+~/.local/bin/multi-desktop-notify.py --update
+```
+
+---
+
+## Uninstallation
+
+To remove all notification scripts and restore your previous configurations:
+
+### Method 1: Run uninstallation script
+
+```bash
+./uninstall.sh
+```
+
+### Method 2: 1-line uninstallation via curl
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash
+```
+
+### Method 3: Using the `--uninstall` flag
+
+```bash
+~/.local/bin/multi-desktop-notify.py --uninstall
+```
+
+---
+
+## Optional webhook configuration
+
+To forward notifications to mobile apps or team chat channels when you are away from your desk, create `~/.config/ai-agent-notifier/config.json`:
+
+```json
+{
+  "webhooks": {
+    "slack": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+    "discord": "https://discord.com/api/webhooks/YOUR/WEBHOOK/URL",
+    "bark": "https://api.day.app/YOUR_KEY",
+    "ntfy": "https://ntfy.sh/your_topic",
+    "feishu": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_KEY",
+    "dingtalk": "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN"
+  }
+}
+```
+
+---
+
+## Repository structure
 
 ```
 ai-agent-desktop-notifier/
 ├── bin/
-│   └── multi-desktop-notify.py   # Multi-monitor PyGObject GTK popup engine
+│   └── multi-desktop-notify.py   # Multi-monitor PyGObject GTK popup & window focus engine
 ├── hooks/
-│   ├── claude-notify.sh          # Hook handler for Claude Code
-│   ├── codex-notify.py           # Notification handler for Codex
-│   └── antigravity-notify.sh     # Hook handler for Antigravity
+│   ├── claude-notify.sh          # Lifecycle hook handler for Claude Code
+│   ├── codex-notify.py           # Notification handler for OpenAI Codex
+│   └── antigravity-notify.sh     # Lifecycle hook handler for Google Antigravity
 ├── install.sh                    # One-command installer & config merger
-├── README.md                     # Project documentation
+├── update.sh                     # Automated updater & config syncer
+├── uninstall.sh                  # Uninstaller & backup restorer
+├── README.md                     # Documentation
 ├── .gitignore
 └── LICENSE
 ```
 
 ---
 
-## Testing Notifications Manually
+## Testing notifications manually
 
 You can test notifications on all your screens anytime by running:
 
 ```bash
 # Test Claude Code question notification
 echo '{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Test question on all screens?"}]}}' | ~/.claude/hooks/notify-input.sh
+
+# Test Claude Code session start capture
+echo '{"hook_event_name":"SessionStart","session_id":"test-session-001"}' | ~/.claude/hooks/notify-input.sh
 
 # Test Codex completion notification
 ~/.codex/notify.py '{"type":"agent-turn-complete","last-assistant-message":"Codex completed task!"}'

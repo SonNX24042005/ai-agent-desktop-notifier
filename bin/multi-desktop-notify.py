@@ -854,14 +854,47 @@ def main():
     parser.add_argument("--caller-pid", type=int, default=0)
     parser.add_argument("--project-hint", default="")
     parser.add_argument("--caller-tty", default="")
-    parser.add_argument("--terminal-screen", default="")
     parser.add_argument("--session-id", default="")
     parser.add_argument("--capture-session", action="store_true", default=False)
     parser.add_argument("--dedupe-seconds", type=int, default=2)
+    parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
+    parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
+    parser.add_argument("--install", action="store_true", default=False, help="Install notification system into current user profile.")
 
     args = parser.parse_args()
 
-    # 0. Session capture mode (Pure side-effect, 0ms execution without rendering UI)
+    # 0. Lifecycle management flags (update / uninstall / install)
+    if args.update:
+        print("🔄 Updating AI Agent Desktop Notifier...")
+        user_home = os.path.expanduser("~")
+        update_cmd = os.path.join(user_home, ".local", "bin", "ai-agent-notifier-update")
+        if os.path.exists(update_cmd) and os.access(update_cmd, os.X_OK):
+            subprocess.run([update_cmd], check=False)
+        else:
+            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash"], check=False)
+        return
+
+    if args.uninstall:
+        print("🗑️  Uninstalling AI Agent Desktop Notifier...")
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_uninstall = os.path.join(script_dir, "uninstall.sh")
+        if os.path.exists(local_uninstall) and os.access(local_uninstall, os.X_OK):
+            subprocess.run([local_uninstall], check=False)
+        else:
+            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash"], check=False)
+        return
+
+    if args.install:
+        print("📦 Installing AI Agent Desktop Notifier...")
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_install = os.path.join(script_dir, "install.sh")
+        if os.path.exists(local_install) and os.access(local_install, os.X_OK):
+            subprocess.run([local_install], check=False)
+        else:
+            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash"], check=False)
+        return
+
+    # 1. Session capture mode (Pure side-effect, 0ms execution without rendering UI)
     if args.capture_session:
         target_wid = find_target_window(
             window_id_arg=args.window_id,
@@ -877,7 +910,7 @@ def main():
 
     message = clean_text(args.message)
 
-    # 1. Deduplication check (Skip duplicate notification spam)
+    # 2. Deduplication check (Skip duplicate notification spam)
     if is_duplicate_notification(args.app_name, args.title, message, args.dedupe_seconds):
         return
 
