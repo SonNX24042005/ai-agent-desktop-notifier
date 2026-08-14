@@ -277,19 +277,16 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
     that triggered the notification.
     """
-    # 1. Resolve a GNOME Terminal window from its unique controlling TTY.
-    #    This must happen before PID walking: one gnome-terminal-server owns
-    #    every terminal window and tab in the session.
-    tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
-    if tty_window:
-        return tty_window
+    active_hint = str(window_id_arg).strip() if window_id_arg and str(window_id_arg).strip().isdigit() else ""
+    project_hint = (project_hint or "").strip().lower()
+
+    # 1. Fast path: Check explicit window_id_arg first if valid toplevel
+    if active_hint and is_valid_toplevel_window(active_hint):
+        return active_hint
 
     # 2. Walk up PID tree from caller_pid to find window owning the process
     curr_pid = caller_pid if caller_pid else os.getppid()
     visited = set()
-
-    active_hint = str(window_id_arg).strip() if window_id_arg and str(window_id_arg).strip().isdigit() else ""
-    project_hint = (project_hint or "").strip().lower()
 
     while curr_pid and curr_pid > 1 and curr_pid not in visited:
         visited.add(curr_pid)
@@ -298,12 +295,6 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
             wids = [w.strip() for w in res.decode().splitlines() if w.strip()]
             candidates = [wid for wid in wids if is_valid_toplevel_window(wid)]
             if candidates:
-                # Multi-window apps (e.g. VS Code) share one PID across all their
-                # windows, so PID alone can't tell them apart. The "active window
-                # at hook time" hint is useless once the user has switched away
-                # (which is exactly when they need the notification), so prefer
-                # matching the project/folder name (from cwd) against window
-                # titles first - that stays correct regardless of current focus.
                 if project_hint and len(candidates) > 1:
                     for wid in candidates:
                         if project_hint in find_window_title(wid):
@@ -321,11 +312,11 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
         except Exception:
             break
 
-    # 3. Fallback to explicit window_id_arg if valid toplevel
-    if window_id_arg and str(window_id_arg).strip().isdigit():
-        wid = str(window_id_arg).strip()
-        if is_valid_toplevel_window(wid):
-            return wid
+    # 3. Fallback to TTY resolution if pts available
+    if caller_tty:
+        tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
+        if tty_window:
+            return tty_window
 
     # 4. Fallback to active window if valid toplevel
     try:

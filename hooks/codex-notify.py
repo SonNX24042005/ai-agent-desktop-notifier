@@ -102,7 +102,7 @@ def handle_completion(payload):
         "Codex đã hoàn thành lượt làm việc.",
         urgency="normal",
         sound_path=SOUND_COMPLETE,
-        timeout=5,
+        timeout=0,
     )
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Safe execution: errors in notification script must never crash Antigravity
+# Safe execution: errors in notification script must never crash or delay Antigravity
 set +e
 
 USER_HOME="${HOME:-/home/$USER}"
@@ -12,18 +12,67 @@ SOUND_COMPLETE="/usr/share/sounds/freedesktop/stereo/complete.oga"
 
 payload="$(cat)"
 
+# 0. Empty payload fast exit
+if [ -z "$payload" ]; then
+    echo "{}"
+    exit 0
+fi
+
+# 1. Ignore background initialization from agent2agents immediately (0ms)
+if [ "${AGENT2AGENTS_INITIALIZING:-0}" = "1" ] || [ "${A2A_SILENT:-0}" = "1" ]; then
+    case "$payload" in
+        *toolCall*) echo '{"decision": "allow"}' ;;
+        *) echo "{}" ;;
+    esac
+    exit 0
+fi
+
+if [[ "$payload" == *"Initializing imported session history"* ]]; then
+    case "$payload" in
+        *toolCall*) echo '{"decision": "allow"}' ;;
+        *) echo "{}" ;;
+    esac
+    exit 0
+fi
+
+# 2. Fast-path: If it is a toolCall but NOT a question tool, immediately allow and exit (0ms)
+if [[ "$payload" == *"toolCall"* ]]; then
+    if [[ "$payload" != *"ask_question"* ]] && [[ "$payload" != *"AskUserQuestion"* ]] && [[ "$payload" != *"ask_user"* ]]; then
+        echo '{"decision": "allow"}'
+        exit 0
+    fi
+fi
+
+# 3. Check for genuine question vs completion
+is_question=0
+is_completion=0
+
+if [[ "$payload" == *"ask_question"* ]] || [[ "$payload" == *"AskUserQuestion"* ]] || [[ "$payload" == *"ask_user"* ]]; then
+    is_question=1
+elif [[ "$payload" == *"terminationReason"* ]] || [[ "$payload" == *"\"Stop\""* ]] || [[ "$payload" == *"agent_completed"* ]]; then
+    is_completion=1
+fi
+
+# If neither, exit immediately without doing any work
+if [ "$is_question" -eq 0 ] && [ "$is_completion" -eq 0 ]; then
+    case "$payload" in
+        *toolCall*) echo '{"decision": "allow"}' ;;
+        *) echo "{}" ;;
+    esac
+    exit 0
+fi
+
 # Fallback values
 NOTIF_TITLE="Antigravity"
 NOTIF_MSG="Antigravity đang chờ bạn."
 NOTIF_URGENCY="normal"
 NOTIF_SOUND="$SOUND_COMPLETE"
 NOTIF_QUESTIONS=""
-NOTIF_TIMEOUT="5"
+NOTIF_TIMEOUT="0"
 SHOULD_NOTIFY="0"
 OUTPUT_JSON="{}"
 
-if [ -n "$payload" ]; then
-    eval "$("$PYTHON3" -c '
+eval "$("$PYTHON3" -c '
 import sys, json, shlex, os
 
 raw_payload = sys.argv[1]
@@ -37,7 +86,7 @@ message = "Antigravity đang chờ bạn."
 urgency = "normal"
 sound = ""
 questions_json = ""
-timeout = 5
+timeout = 0
 should_notify = False
 is_pre_tool = False
 project_hint = os.path.basename((data.get("cwd") or os.getcwd()).rstrip("/"))
@@ -50,7 +99,7 @@ termination_reason = data.get("terminationReason") or ""
 event_name = data.get("hook_event_name") or data.get("event") or ""
 notif_type = data.get("notification_type") or data.get("type") or ""
 
-# 1. Check for genuine question / user input
+# Genuine question check
 if tool_name in ["ask_question", "AskUserQuestion", "ask_user"] or (event_name == "PreToolUse" and "ask" in tool_name.lower()):
     is_pre_tool = True
     should_notify = True
@@ -70,30 +119,19 @@ if tool_name in ["ask_question", "AskUserQuestion", "ask_user"] or (event_name =
             q_text = str(tool_args["prompt"])
     message = q_text or "Antigravity đang đặt câu hỏi cho bạn."
 
-# 2. Check for tool executions - allow silently without popups
-elif tool_name or event_name == "PreToolUse":
-    is_pre_tool = True
-    should_notify = False
-
-# 3. Check for task completion (Stop / agent_completed)
+# Genuine task completion check
 elif termination_reason or event_name in ["Stop", "agent_completed"] or notif_type == "agent_completed":
-    # Ignore background initialization prompts (e.g. from agent2agents)
-    is_init_seed = (
-        os.environ.get("AGENT2AGENTS_INITIALIZING") == "1"
-        or os.environ.get("A2A_SILENT") == "1"
-        or "Initializing imported session history" in raw_payload
-    )
-    if is_init_seed:
-        should_notify = False
-    else:
-        should_notify = True
-        title = "Antigravity: Hoàn thành"
-        urgency = "normal"
-        sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
-        message = "Antigravity đã hoàn thành trả lời."
-        timeout = 5
+    should_notify = True
+    title = "Antigravity: Hoàn thành"
+    urgency = "normal"
+    sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+    message = "Antigravity đã hoàn thành trả lời."
+    timeout = 0
 
-print(f"SHOULD_NOTIFY={\x271\x27 if should_notify else \x270\x27}")
+sn = "1" if should_notify else "0"
+out_json = "{\"decision\": \"allow\"}" if is_pre_tool else "{}"
+
+print(f"SHOULD_NOTIFY={sn}")
 print(f"NOTIF_TITLE={shlex.quote(title)}")
 print(f"NOTIF_MSG={shlex.quote(message)}")
 print(f"NOTIF_URGENCY={shlex.quote(urgency)}")
@@ -101,55 +139,30 @@ print(f"NOTIF_SOUND={shlex.quote(sound)}")
 print(f"NOTIF_QUESTIONS={shlex.quote(questions_json)}")
 print(f"NOTIF_PROJECT_HINT={shlex.quote(project_hint)}")
 print(f"NOTIF_TIMEOUT={timeout}")
-if is_pre_tool:
-    print("OUTPUT_JSON=\"{\\\"decision\\\": \\\"allow\\\"}\"")
-else:
-    print("OUTPUT_JSON=\"{}\"")
-' "$payload" 2>/dev/null)"
+print(f"OUTPUT_JSON={shlex.quote(out_json)}")
+' "$payload")"
 
+# Respond to Antigravity immediately so the agent engine never waits
+echo "${OUTPUT_JSON:-{\}}"
+
+if [ "$SHOULD_NOTIFY" = "1" ] && [ -x "$MULTI_NOTIFY" ]; then
     caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
     caller_pid="$$"
-
-    find_caller_tty() {
-        local pid="$1"
-        local tty_path=""
-        local parent_pid=""
-        local fd=""
-
-        while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
-            for fd in 0 1 2; do
-                tty_path="$(readlink "/proc/$pid/fd/$fd" 2>/dev/null || echo "")"
-                case "$tty_path" in
-                    /dev/pts/*) printf '%s' "$tty_path"; return 0 ;;
-                esac
-            done
-            parent_pid="$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo "")"
-            [ "$parent_pid" = "$pid" ] && break
-            pid="$parent_pid"
-        done
-    }
-
-    caller_tty="$(find_caller_tty "$caller_pid")"
     terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
 
-    if [ "$SHOULD_NOTIFY" = "1" ] && [ -x "$MULTI_NOTIFY" ]; then
-        setsid "$PYTHON3" "$MULTI_NOTIFY" \
-            --app-name="Antigravity" \
-            --title="${NOTIF_TITLE:-Antigravity}" \
-            --message="${NOTIF_MSG:-Antigravity đang chờ bạn.}" \
-            --questions-json="${NOTIF_QUESTIONS:-}" \
-            --urgency="${NOTIF_URGENCY:-normal}" \
-            --sound="${NOTIF_SOUND:-$SOUND_COMPLETE}" \
-            --window-id="$caller_window" \
-            --caller-pid="$caller_pid" \
-            --project-hint="${NOTIF_PROJECT_HINT:-}" \
-            --caller-tty="$caller_tty" \
-            --terminal-screen="$terminal_screen" \
-            --timeout="${NOTIF_TIMEOUT:-5}" </dev/null >/dev/null 2>&1 &
-        disown
-    fi
+    setsid "$PYTHON3" "$MULTI_NOTIFY" \
+        --app-name="Antigravity" \
+        --title="${NOTIF_TITLE:-Antigravity}" \
+        --message="${NOTIF_MSG:-Antigravity đang chờ bạn.}" \
+        --questions-json="${NOTIF_QUESTIONS:-}" \
+        --urgency="${NOTIF_URGENCY:-normal}" \
+        --sound="${NOTIF_SOUND:-$SOUND_COMPLETE}" \
+        --window-id="$caller_window" \
+        --caller-pid="$caller_pid" \
+        --project-hint="${NOTIF_PROJECT_HINT:-}" \
+        --terminal-screen="$terminal_screen" \
+        --timeout="${NOTIF_TIMEOUT:-5}" </dev/null >/dev/null 2>&1 &
+    disown
 fi
 
-# Antigravity hook protocol requires JSON on stdout
-echo "${OUTPUT_JSON:-{\}}"
 exit 0
