@@ -135,7 +135,46 @@ if os.path.exists(gemini_hooks_file):
     except Exception:
         gdata = {}
 
+# 3. Antigravity (~/.gemini/settings.json & ~/.gemini/config/hooks.json)
 hook_cmd = f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"
+
+gemini_settings_file = os.path.join(USER_HOME, ".gemini", "settings.json")
+if os.path.exists(gemini_settings_file):
+    try:
+        with open(gemini_settings_file, "r") as f:
+            sdata = json.load(f)
+    except Exception:
+        sdata = {}
+    if "hooks" not in sdata:
+        sdata["hooks"] = {}
+    sdata["hooks"]["PreInvocation"] = [
+        {"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}
+    ]
+    sdata["hooks"]["PreToolUse"] = [
+        {"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
+    ]
+    sdata["hooks"]["Stop"] = [
+        {"hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
+    ]
+    sdata["hooks"]["Notification"] = [
+        {"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
+    ]
+    with open(gemini_settings_file, "w") as f:
+        json.dump(sdata, f, indent=2)
+    print("✓ Synced Antigravity settings.json (~/.gemini/settings.json)")
+
+gemini_config_dir = os.path.join(USER_HOME, ".gemini", "config")
+os.makedirs(gemini_config_dir, exist_ok=True)
+gemini_hooks_file = os.path.join(gemini_config_dir, "hooks.json")
+
+gdata = {}
+if os.path.exists(gemini_hooks_file):
+    try:
+        with open(gemini_hooks_file, "r") as f:
+            gdata = json.load(f)
+    except Exception:
+        gdata = {}
+
 gdata["desktop-notifier"] = {
     "PreInvocation": [
         {

@@ -44,7 +44,20 @@ if os.path.exists(claude_path):
     except Exception:
         pass
 
-# 3. Clean up Antigravity hooks
+# 3. Clean up Antigravity hooks (settings.json & hooks.json)
+gemini_settings_file = os.path.join(USER_HOME, ".gemini", "settings.json")
+if os.path.exists(gemini_settings_file):
+    try:
+        with open(gemini_settings_file, "r") as f:
+            sdata = json.load(f)
+        if "hooks" in sdata:
+            del sdata["hooks"]
+            with open(gemini_settings_file, "w") as f:
+                json.dump(sdata, f, indent=2)
+            print("✓ Cleaned hooks from Antigravity settings.json")
+    except Exception:
+        pass
+
 gemini_hooks_file = os.path.join(USER_HOME, ".gemini", "config", "hooks.json")
 if os.path.exists(gemini_hooks_file):
     try:
