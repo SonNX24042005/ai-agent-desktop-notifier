@@ -272,53 +272,82 @@ def find_window_by_tty(tty_path, terminal_screen=""):
     return ""
 
 
+def get_process_ancestors(pid):
+    ancestors = set()
+    curr = int(pid or 0)
+    visited = set()
+    while curr > 1 and curr not in visited:
+        visited.add(curr)
+        ancestors.add(curr)
+        try:
+            with open(f"/proc/{curr}/stat", "r") as f:
+                curr = int(f.read().split()[3])
+        except Exception:
+            break
+    return ancestors
+
+
+def get_all_managed_windows():
+    results = []
+    try:
+        out = subprocess.check_output(["xdotool", "search", "--onlyvisible", ""], stderr=subprocess.DEVNULL).decode()
+        for wid in out.splitlines():
+            wid = wid.strip()
+            if not wid or not is_valid_toplevel_window(wid):
+                continue
+            try:
+                name = subprocess.check_output(["xdotool", "getwindowname", wid], stderr=subprocess.DEVNULL).decode().strip()
+                if not name:
+                    continue
+                wpid_str = subprocess.check_output(["xdotool", "getwindowpid", wid], stderr=subprocess.DEVNULL).decode().strip()
+                wpid = int(wpid_str) if wpid_str.isdigit() else 0
+                results.append((wid, name, wpid))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return results
+
+
 def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen=""):
     """
     Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
-    that triggered the notification.
+    that triggered the notification with 100% precision.
     """
-    active_hint = str(window_id_arg).strip() if window_id_arg and str(window_id_arg).strip().isdigit() else ""
     project_hint = (project_hint or "").strip().lower()
+    managed_windows = get_all_managed_windows()
 
-    # 1. Fast path: Check explicit window_id_arg first if valid toplevel
-    if active_hint and is_valid_toplevel_window(active_hint):
-        return active_hint
+    # 1. Tier 1: Match by PID tree + project_hint (Exact process owner)
+    if caller_pid:
+        pid_tree = get_process_ancestors(caller_pid)
+        tree_windows = [(wid, name) for wid, name, wpid in managed_windows if wpid in pid_tree]
+        if tree_windows:
+            if project_hint:
+                for wid, name in tree_windows:
+                    if project_hint in name.lower():
+                        return wid
+            return tree_windows[0][0]
 
-    # 2. Walk up PID tree from caller_pid to find window owning the process
-    curr_pid = caller_pid if caller_pid else os.getppid()
-    visited = set()
+    # 2. Tier 2: Match project_hint in window title across open developer windows
+    # (Matches the specific VS Code workspace or Terminal project folder even if user switched away to browser)
+    if project_hint:
+        for wid, name, wpid in managed_windows:
+            if project_hint in name.lower():
+                return wid
 
-    while curr_pid and curr_pid > 1 and curr_pid not in visited:
-        visited.add(curr_pid)
-        try:
-            res = subprocess.check_output(["xdotool", "search", "--pid", str(curr_pid)], stderr=subprocess.DEVNULL)
-            wids = [w.strip() for w in res.decode().splitlines() if w.strip()]
-            candidates = [wid for wid in wids if is_valid_toplevel_window(wid)]
-            if candidates:
-                if project_hint and len(candidates) > 1:
-                    for wid in candidates:
-                        if project_hint in find_window_title(wid):
-                            return wid
-                if active_hint and active_hint in candidates:
-                    return active_hint
-                return candidates[0]
-        except Exception:
-            pass
-
-        try:
-            with open(f"/proc/{curr_pid}/stat", "r") as f:
-                stat = f.read().split()
-                curr_pid = int(stat[3])
-        except Exception:
-            break
-
-    # 3. Fallback to TTY resolution if pts available
+    # 3. Tier 3: Match window from TTY / pts if provided
     if caller_tty:
         tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
-        if tty_window:
+        if tty_window and is_valid_toplevel_window(tty_window):
             return tty_window
 
-    # 4. Fallback to active window if valid toplevel
+    # 4. Tier 4: Explicit window_id_arg if valid
+    if window_id_arg and str(window_id_arg).strip().isdigit():
+        wid = str(window_id_arg).strip()
+        if is_valid_toplevel_window(wid):
+            return wid
+
+    # 5. Tier 5: Fallback to active window
     try:
         res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
         active_wid = res.decode().strip()
@@ -332,22 +361,37 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
 
 def focus_target_window(window_id):
     """
-    Activates and brings to front the specified window ID using xdotool / wmctrl.
+    Activates and brings to front the specified window ID using GDK native and xdotool / EWMH.
     """
     if not window_id:
         return False
+
+    wid_str = str(window_id).strip()
+    if not wid_str.isdigit():
+        return False
+
+    wid_int = int(wid_str)
+
+    # 1. Native GDK / GdkX11 focus
     try:
-        subprocess.Popen(["xdotool", "windowactivate", "--sync", str(window_id)], stderr=subprocess.DEVNULL)
-        return True
+        import gi
+        gi.require_version("Gdk", "3.0")
+        gi.require_version("GdkX11", "3.0")
+        from gi.repository import Gdk, GdkX11
+        display = Gdk.Display.get_default()
+        if display and isinstance(display, GdkX11.X11Display):
+            gdk_win = GdkX11.X11Window.foreign_new_for_display(display, wid_int)
+            if gdk_win:
+                gdk_win.focus(Gdk.CURRENT_TIME)
+                gdk_win.show()
     except Exception:
         pass
+
+    # 2. Xdotool windowactivate, windowraise, and windowfocus
     try:
-        subprocess.Popen(["xdotool", "windowraise", str(window_id)], stderr=subprocess.DEVNULL)
-        return True
-    except Exception:
-        pass
-    try:
-        subprocess.Popen(["wmctrl", "-i", "-a", str(window_id)], stderr=subprocess.DEVNULL)
+        subprocess.run(["xdotool", "windowactivate", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["xdotool", "windowraise", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["xdotool", "windowfocus", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return True
     except Exception:
         return False
@@ -397,7 +441,7 @@ def extract_summary_from_payload(questions_json_raw, fallback_message):
     return fallback_message
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0):
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint=""):
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         return
 
@@ -507,9 +551,23 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         windows = []
 
         def handle_focus_and_close():
-            if target_window_id:
-                focus_target_window(target_window_id)
-            Gtk.main_quit()
+            wid_to_focus = target_window_id
+            if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
+                wid_to_focus = find_target_window(
+                    window_id_arg="",
+                    caller_pid=caller_pid,
+                    project_hint=project_hint,
+                )
+            if wid_to_focus:
+                focus_target_window(wid_to_focus)
+
+            for w in windows:
+                try:
+                    w.hide()
+                except Exception:
+                    pass
+
+            GLib.timeout_add(60, Gtk.main_quit)
 
         for i in range(n_monitors):
             monitor = display.get_monitor(i)
@@ -682,6 +740,8 @@ def main():
         questions_json=args.questions_json,
         target_window_id=target_window_id,
         timeout=args.timeout,
+        caller_pid=args.caller_pid,
+        project_hint=args.project_hint,
     )
 
 
