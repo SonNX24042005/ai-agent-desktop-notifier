@@ -18,26 +18,29 @@ NOTIF_MSG="Antigravity đang chờ bạn."
 NOTIF_URGENCY="normal"
 NOTIF_SOUND="$SOUND_COMPLETE"
 NOTIF_QUESTIONS=""
+NOTIF_TIMEOUT="5"
+SHOULD_NOTIFY="0"
 OUTPUT_JSON="{}"
 
 if [ -n "$payload" ]; then
     eval "$("$PYTHON3" -c '
-import sys, json, shlex
+import sys, json, shlex, os
 
+raw_payload = sys.argv[1]
 try:
-    data = json.loads(sys.argv[1])
+    data = json.loads(raw_payload)
 except Exception:
     data = {}
-
-import os as _os
 
 title = "Antigravity"
 message = "Antigravity đang chờ bạn."
 urgency = "normal"
 sound = ""
 questions_json = ""
+timeout = 5
+should_notify = False
 is_pre_tool = False
-project_hint = _os.path.basename((data.get("cwd") or _os.getcwd()).rstrip("/"))
+project_hint = os.path.basename((data.get("cwd") or os.getcwd()).rstrip("/"))
 
 tool_call = data.get("toolCall") or {}
 tool_name = tool_call.get("name") or data.get("tool_name") or ""
@@ -47,11 +50,14 @@ termination_reason = data.get("terminationReason") or ""
 event_name = data.get("hook_event_name") or data.get("event") or ""
 notif_type = data.get("notification_type") or data.get("type") or ""
 
-if tool_name in ["ask_question", "AskUserQuestion"] or (event_name == "PreToolUse" and "ask" in tool_name.lower()):
+# 1. Check for genuine question / user input
+if tool_name in ["ask_question", "AskUserQuestion", "ask_user"] or (event_name == "PreToolUse" and "ask" in tool_name.lower()):
     is_pre_tool = True
+    should_notify = True
     title = "Antigravity: Câu hỏi"
     urgency = "critical"
     sound = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
+    timeout = 0
     questions_json = json.dumps(tool_args) if tool_args else ""
     
     q_text = ""
@@ -64,33 +70,37 @@ if tool_name in ["ask_question", "AskUserQuestion"] or (event_name == "PreToolUs
             q_text = str(tool_args["prompt"])
     message = q_text or "Antigravity đang đặt câu hỏi cho bạn."
 
-elif tool_name:
+# 2. Check for tool executions - allow silently without popups
+elif tool_name or event_name == "PreToolUse":
     is_pre_tool = True
-    title = f"Antigravity: Thao tác ({tool_name})"
-    urgency = "normal"
-    sound = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
-    desc = ""
-    if isinstance(tool_args, dict):
-        desc = tool_args.get("Description") or tool_args.get("CommandLine") or tool_args.get("TargetFile") or ""
-    message = desc or f"Antigravity đang thực hiện {tool_name}."
+    should_notify = False
 
+# 3. Check for task completion (Stop / agent_completed)
 elif termination_reason or event_name in ["Stop", "agent_completed"] or notif_type == "agent_completed":
-    title = "Antigravity: Hoàn thành"
-    urgency = "normal"
-    sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
-    message = "Antigravity đã hoàn thành trả lời."
+    # Ignore background initialization prompts (e.g. from agent2agents)
+    is_init_seed = (
+        os.environ.get("AGENT2AGENTS_INITIALIZING") == "1"
+        or os.environ.get("A2A_SILENT") == "1"
+        or "Initializing imported session history" in raw_payload
+    )
+    if is_init_seed:
+        should_notify = False
+    else:
+        should_notify = True
+        title = "Antigravity: Hoàn thành"
+        urgency = "normal"
+        sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+        message = "Antigravity đã hoàn thành trả lời."
+        timeout = 5
 
-elif data.get("message") or data.get("title"):
-    title = data.get("title") or "Antigravity"
-    message = data.get("message") or "Antigravity cần chú ý."
-    sound = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
-
+print(f"SHOULD_NOTIFY={\x271\x27 if should_notify else \x270\x27}")
 print(f"NOTIF_TITLE={shlex.quote(title)}")
 print(f"NOTIF_MSG={shlex.quote(message)}")
 print(f"NOTIF_URGENCY={shlex.quote(urgency)}")
 print(f"NOTIF_SOUND={shlex.quote(sound)}")
 print(f"NOTIF_QUESTIONS={shlex.quote(questions_json)}")
 print(f"NOTIF_PROJECT_HINT={shlex.quote(project_hint)}")
+print(f"NOTIF_TIMEOUT={timeout}")
 if is_pre_tool:
     print("OUTPUT_JSON=\"{\\\"decision\\\": \\\"allow\\\"}\"")
 else:
@@ -122,7 +132,7 @@ else:
     caller_tty="$(find_caller_tty "$caller_pid")"
     terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
 
-    if [ -x "$MULTI_NOTIFY" ]; then
+    if [ "$SHOULD_NOTIFY" = "1" ] && [ -x "$MULTI_NOTIFY" ]; then
         setsid "$PYTHON3" "$MULTI_NOTIFY" \
             --app-name="Antigravity" \
             --title="${NOTIF_TITLE:-Antigravity}" \
@@ -135,7 +145,7 @@ else:
             --project-hint="${NOTIF_PROJECT_HINT:-}" \
             --caller-tty="$caller_tty" \
             --terminal-screen="$terminal_screen" \
-            --timeout=0 </dev/null >/dev/null 2>&1 &
+            --timeout="${NOTIF_TIMEOUT:-5}" </dev/null >/dev/null 2>&1 &
         disown
     fi
 fi

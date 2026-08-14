@@ -80,8 +80,6 @@ if os.path.exists(claude_path):
         ],
         "Notification": [
             {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
-            {"matcher": "idle_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
-            {"matcher": "agent_needs_input", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
             {"matcher": "agent_completed", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
         ],
         "Stop": [

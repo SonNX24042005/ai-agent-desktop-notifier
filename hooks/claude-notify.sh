@@ -23,29 +23,37 @@ title="Claude Code"
 message=""
 urgency="normal"
 sound=""
+timeout="5"
+should_notify=0
 
 questions_json=""
 if [ "$event_name" = "PreToolUse" ] || [ "$tool_name" = "AskUserQuestion" ]; then
-    urgency="critical"
-    sound="$SOUND_WARNING"
-    title="Claude Code: Câu hỏi"
-    questions_json="$(printf '%s' "$payload" | $JQ -c '.tool_input // {}' 2>/dev/null)"
-    question="$(printf '%s' "$payload" | $JQ -r '
-        if .tool_input.questions then
-            .tool_input.questions | map(.question // .title // "") | join("\n")
-        elif .tool_input.question then
-            .tool_input.question
-        elif .tool_input.prompt then
-            .tool_input.prompt
-        else
-            .message // "Claude đang đặt câu hỏi cho bạn"
-        end
-    ' 2>/dev/null)"
-    message="$question"
+    if [ "$tool_name" = "AskUserQuestion" ] || [[ "$tool_name" =~ [Aa]sk ]]; then
+        should_notify=1
+        urgency="critical"
+        sound="$SOUND_WARNING"
+        title="Claude Code: Câu hỏi"
+        timeout="0"
+        questions_json="$(printf '%s' "$payload" | $JQ -c '.tool_input // {}' 2>/dev/null)"
+        question="$(printf '%s' "$payload" | $JQ -r '
+            if .tool_input.questions then
+                .tool_input.questions | map(.question // .title // "") | join("\n")
+            elif .tool_input.question then
+                .tool_input.question
+            elif .tool_input.prompt then
+                .tool_input.prompt
+            else
+                .message // "Claude đang đặt câu hỏi cho bạn"
+            end
+        ' 2>/dev/null)"
+        message="$question"
+    fi
 
 elif [ "$notif_type" = "permission_prompt" ] || [ "$event_name" = "PermissionRequest" ]; then
+    should_notify=1
     urgency="critical"
     sound="$SOUND_WARNING"
+    timeout="0"
     if [ -n "$tool_name" ]; then
         title="Claude Code: Cần cấp quyền ($tool_name)"
     else
@@ -60,22 +68,16 @@ elif [ "$notif_type" = "permission_prompt" ] || [ "$event_name" = "PermissionReq
     message="$detail"
 
 elif [ "$notif_type" = "agent_completed" ] || [ "$event_name" = "Stop" ]; then
+    should_notify=1
     urgency="normal"
     sound="$SOUND_COMPLETE"
     title="Claude Code: Hoàn thành"
     message="Claude đã hoàn thành trả lời."
+    timeout="5"
+fi
 
-elif [ "$notif_type" = "agent_needs_input" ] || [ "$notif_type" = "idle_prompt" ]; then
-    urgency="critical"
-    sound="$SOUND_WARNING"
-    title="Claude Code: Chờ phản hồi"
-    msg="$(printf '%s' "$payload" | $JQ -r '.message // "Claude đang chờ bạn phản hồi."' 2>/dev/null)"
-    message="$msg"
-
-else
-    msg="$(printf '%s' "$payload" | $JQ -r '.message // .title // "Claude Code cần chú ý"' 2>/dev/null)"
-    message="$msg"
-    sound="$SOUND_WARNING"
+if [ "$should_notify" -eq 0 ]; then
+    exit 0
 fi
 
 if [ -z "$message" ] || [ "$message" = "null" ]; then
@@ -130,7 +132,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --project-hint="$project_hint" \
         --caller-tty="$caller_tty" \
         --terminal-screen="$terminal_screen" \
-        --timeout=0 </dev/null >/dev/null 2>&1 &
+        --timeout="${timeout:-5}" </dev/null >/dev/null 2>&1 &
     disown
 fi
 

@@ -45,7 +45,7 @@ def find_caller_tty(start_pid):
     return ""
 
 
-def send_notification(title, message, urgency="normal", sound_path=None, questions_json=""):
+def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0):
     msg = clean_text(message)
 
     caller_window = ""
@@ -73,7 +73,7 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--project-hint={project_hint}",
                 f"--caller-tty={caller_tty}",
                 f"--terminal-screen={terminal_screen}",
-                "--timeout=0",
+                f"--timeout={timeout}",
             ]
             if sound_path:
                 cmd.append(f"--sound={sound_path}")
@@ -102,6 +102,7 @@ def handle_completion(payload):
         "Codex đã hoàn thành lượt làm việc.",
         urgency="normal",
         sound_path=SOUND_COMPLETE,
+        timeout=5,
     )
 
 
