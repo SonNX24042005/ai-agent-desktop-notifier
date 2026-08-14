@@ -53,11 +53,38 @@ termination_reason = data.get("terminationReason") or ""
 event_name = data.get("hook_event_name") or data.get("event") or ""
 notif_type = data.get("notification_type") or data.get("type") or ""
 
+def resolve_env():
+    env = os.environ.copy()
+    if not env.get("DISPLAY"):
+        for disp in [":1", ":0"]:
+            if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
+                env["DISPLAY"] = disp
+                break
+        else:
+            env["DISPLAY"] = ":1"
+
+    uid = os.getuid()
+    if not env.get("XDG_RUNTIME_DIR"):
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+
+    if not env.get("XAUTHORITY"):
+        for xauth_path in [
+            f"/run/user/{uid}/gdm/Xauthority",
+            os.path.expanduser("~/.Xauthority"),
+            f"/run/user/{uid}/.Xauthority",
+        ]:
+            if os.path.exists(xauth_path):
+                env["XAUTHORITY"] = xauth_path
+                break
+    return env
+
+
 # 3. PreInvocation - early session capture
 if "invocationNum" in data or event_name == "PreInvocation":
     if conversation_id and os.path.exists(MULTI_NOTIFY):
+        env = resolve_env()
         try:
-            caller_win = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1).stdout.strip()
+            caller_win = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1, env=env).stdout.strip()
         except Exception:
             caller_win = ""
         subprocess.Popen([
@@ -66,7 +93,7 @@ if "invocationNum" in data or event_name == "PreInvocation":
             f"--session-id={conversation_id}",
             f"--window-id={caller_win}",
             f"--project-hint={project_hint}",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print("{}")
     sys.exit(0)
 
@@ -121,24 +148,7 @@ sys.stdout.flush()
 
 # 6. Trigger popup asynchronously
 if os.path.exists(MULTI_NOTIFY) and os.access(MULTI_NOTIFY, os.X_OK):
-    env = os.environ.copy()
-    if not env.get("DISPLAY"):
-        for disp in [":1", ":0"]:
-            if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
-                env["DISPLAY"] = disp
-                break
-        else:
-            env["DISPLAY"] = ":1"
-
-    if not env.get("XAUTHORITY"):
-        if os.path.exists("/run/user/1000/gdm/Xauthority"):
-            env["XAUTHORITY"] = "/run/user/1000/gdm/Xauthority"
-        elif os.path.exists(os.path.expanduser("~/.Xauthority")):
-            env["XAUTHORITY"] = os.path.expanduser("~/.Xauthority")
-
-    if not env.get("XDG_RUNTIME_DIR"):
-        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
-
+    env = resolve_env()
     try:
         caller_win = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1, env=env).stdout.strip()
     except Exception:

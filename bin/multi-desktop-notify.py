@@ -32,14 +32,19 @@ if not os.environ.get("DISPLAY"):
     else:
         os.environ["DISPLAY"] = ":1"
 
-if not os.environ.get("XAUTHORITY"):
-    if os.path.exists("/run/user/1000/gdm/Xauthority"):
-        os.environ["XAUTHORITY"] = "/run/user/1000/gdm/Xauthority"
-    elif os.path.exists(os.path.expanduser("~/.Xauthority")):
-        os.environ["XAUTHORITY"] = os.path.expanduser("~/.Xauthority")
-
 if not os.environ.get("XDG_RUNTIME_DIR"):
     os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
+if not os.environ.get("XAUTHORITY"):
+    uid = os.getuid()
+    for xauth_path in [
+        f"/run/user/{uid}/gdm/Xauthority",
+        os.path.expanduser("~/.Xauthority"),
+        f"/run/user/{uid}/.Xauthority",
+    ]:
+        if os.path.exists(xauth_path):
+            os.environ["XAUTHORITY"] = xauth_path
+            break
 
 
 def save_session_window(session_id, window_id, project_hint="", pid=0):
@@ -169,9 +174,12 @@ def kill_previous_instance():
         try:
             with open(PID_FILE, "r") as f:
                 old_pid = int(f.read().strip())
-            if old_pid != os.getpid():
+            if old_pid != os.getpid() and old_pid > 1:
                 try:
-                    os.kill(old_pid, signal.SIGTERM)
+                    with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
+                        cmdline = cf.read().decode(errors="ignore")
+                    if "multi-desktop-notify" in cmdline:
+                        os.kill(old_pid, signal.SIGTERM)
                 except OSError:
                     pass
         except Exception:
@@ -179,6 +187,17 @@ def kill_previous_instance():
     try:
         with open(PID_FILE, "w") as f:
             f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def send_fallback_notify(app_name, title, message, urgency="normal", timeout=0):
+    """Fallback standard desktop notification using notify-send if GUI popup fails."""
+    try:
+        cmd = ["notify-send", f"[{app_name}] {title}", message, "-u", urgency]
+        if timeout > 0:
+            cmd.extend(["-t", str(timeout * 1000)])
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     except Exception:
         pass
 
@@ -603,7 +622,12 @@ def extract_summary_from_payload(questions_json_raw, fallback_message):
 
 
 def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id=""):
+    display_text = extract_summary_from_payload(questions_json, message)
+    if not display_text:
+        display_text = "AI Agent đang chờ bạn tương tác."
+
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
         return
 
     try:
@@ -613,15 +637,13 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         gi.require_version("Pango", "1.0")
         from gi.repository import Gdk, GLib, Gtk, Pango
     except Exception:
+        send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
         return
-
-    display_text = extract_summary_from_payload(questions_json, message)
-    if not display_text:
-        display_text = "AI Agent đang chờ bạn tương tác."
 
     try:
         display = Gdk.Display.get_default()
         if not display:
+            send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
             return
         n_monitors = display.get_n_monitors()
 
@@ -856,7 +878,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
         Gtk.main()
     except Exception:
-        pass
+        send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
 
 
 def main():
@@ -872,6 +894,7 @@ def main():
     parser.add_argument("--caller-pid", type=int, default=0)
     parser.add_argument("--project-hint", default="")
     parser.add_argument("--caller-tty", default="")
+    parser.add_argument("--terminal-screen", default="")
     parser.add_argument("--session-id", default="")
     parser.add_argument("--capture-session", action="store_true", default=False)
     parser.add_argument("--dedupe-seconds", type=int, default=2)
@@ -879,7 +902,7 @@ def main():
     parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
     parser.add_argument("--install", action="store_true", default=False, help="Install notification system into current user profile.")
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     # 0. Lifecycle management flags (update / uninstall / install)
     if args.update:
@@ -919,7 +942,7 @@ def main():
             caller_pid=args.caller_pid,
             project_hint=args.project_hint,
             caller_tty=args.caller_tty,
-            terminal_screen=args.terminal_screen,
+            terminal_screen=getattr(args, "terminal_screen", ""),
             session_id=args.session_id,
         )
         if target_wid and args.session_id:
@@ -941,7 +964,7 @@ def main():
         caller_pid=args.caller_pid,
         project_hint=args.project_hint,
         caller_tty=args.caller_tty,
-        terminal_screen=args.terminal_screen,
+        terminal_screen=getattr(args, "terminal_screen", ""),
         session_id=args.session_id,
     )
 
