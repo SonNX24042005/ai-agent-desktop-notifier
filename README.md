@@ -31,21 +31,10 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
 
 ## Cài đặt nhanh
 
-### Cách 1: Cài đặt nhanh 1 dòng lệnh (khuyên dùng)
-
-Chạy lệnh sau trên terminal của bạn:
+Chạy 1 dòng lệnh sau trên terminal của bạn:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash
-```
-
-### Cách 2: Cài đặt thủ công từ mã nguồn
-
-```bash
-git clone https://github.com/SonNX24042005/ai-agent-desktop-notifier.git
-cd ai-agent-desktop-notifier
-chmod +x install.sh
-./install.sh
 ```
 
 Sau khi cài đặt xong, hãy tải lại cửa sổ VS Code / IDE của bạn:
