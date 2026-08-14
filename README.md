@@ -7,7 +7,10 @@ A lightweight, non-blocking multi-monitor audio-visual desktop notification syst
 ## Features
 
 - **Multi-Monitor Support**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
-- **Direct App Window Focus**: Clicking anywhere on the notification banner or clicking the **"Đến cửa sổ ứng dụng"** button instantly focuses and brings to front the exact workspace window (e.g. the specific VS Code or Terminal window out of 4 open windows) that triggered the notification.
+- **Session-Based Early Window Capture**: Records and caches the exact workspace window at session start (`SessionStart`) with PID ancestry verification, ensuring 100% focus precision even when you switch to other applications or workspaces during long-running tasks.
+- **Direct App Window Focus**: Clicking anywhere on the notification banner or clicking the **"Đến cửa sổ ứng dụng"** button instantly focuses and brings to front the exact workspace window (e.g. the specific VS Code or terminal window out of multiple open instances) that triggered the notification.
+- **Smart Anti-Spam Deduplication**: Automatically deduplicates consecutive identical notifications within a cooldown period to prevent UI flicker.
+- **Multi-Channel Webhooks (Optional)**: Supports forwarding alerts to mobile channels (Feishu, DingTalk, Slack, Discord, Bark, ntfy) via `~/.config/ai-agent-notifier/config.json`.
 - **Unified Clean Design**: Modern dark theme (`#18181b` dark slate background with `#3b82f6` blue accent border). Compact notification layout without heavy form clutter.
 - **Sound Alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent execution loop.
 - **Safe & Non-Blocking**: Runs GTK popups and sound playback asynchronously. Any error in notification scripts will never crash or interrupt your AI CLI or IDE session.

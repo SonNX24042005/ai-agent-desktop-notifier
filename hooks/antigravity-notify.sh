@@ -90,6 +90,7 @@ timeout = 0
 should_notify = False
 is_pre_tool = False
 project_hint = os.path.basename((data.get("cwd") or os.getcwd()).rstrip("/"))
+session_id = str(data.get("session_id") or data.get("sessionId") or data.get("conversationId") or data.get("conversation_id") or "")
 
 tool_call = data.get("toolCall") or {}
 tool_name = tool_call.get("name") or data.get("tool_name") or ""
@@ -138,6 +139,7 @@ print(f"NOTIF_URGENCY={shlex.quote(urgency)}")
 print(f"NOTIF_SOUND={shlex.quote(sound)}")
 print(f"NOTIF_QUESTIONS={shlex.quote(questions_json)}")
 print(f"NOTIF_PROJECT_HINT={shlex.quote(project_hint)}")
+print(f"NOTIF_SESSION_ID={shlex.quote(session_id)}")
 print(f"NOTIF_TIMEOUT={timeout}")
 print(f"OUTPUT_JSON={shlex.quote(out_json)}")
 ' "$payload")"
@@ -161,6 +163,7 @@ if [ "$SHOULD_NOTIFY" = "1" ] && [ -x "$MULTI_NOTIFY" ]; then
         --caller-pid="$caller_pid" \
         --project-hint="${NOTIF_PROJECT_HINT:-}" \
         --terminal-screen="$terminal_screen" \
+        --session-id="${NOTIF_SESSION_ID:-}" \
         --timeout="${NOTIF_TIMEOUT:-5}" </dev/null >/dev/null 2>&1 &
     disown
 fi

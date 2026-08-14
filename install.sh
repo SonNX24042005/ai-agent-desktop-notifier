@@ -75,6 +75,9 @@ if os.path.exists(claude_path):
     except Exception:
         cdata = {}
     cdata["hooks"] = {
+        "SessionStart": [
+            {"hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
+        ],
         "PreToolUse": [
             {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
         ],

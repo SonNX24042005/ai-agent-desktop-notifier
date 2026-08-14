@@ -45,7 +45,7 @@ def find_caller_tty(start_pid):
     return ""
 
 
-def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0):
+def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0, session_id=""):
     msg = clean_text(message)
 
     caller_window = ""
@@ -73,6 +73,7 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--project-hint={project_hint}",
                 f"--caller-tty={caller_tty}",
                 f"--terminal-screen={terminal_screen}",
+                f"--session-id={session_id}",
                 f"--timeout={timeout}",
             ]
             if sound_path:
@@ -97,17 +98,20 @@ def handle_completion(payload):
     if msg_type != "agent-turn-complete":
         return
 
+    session_id = payload.get("session_id") or payload.get("thread_id") or payload.get("turn_id") or ""
     send_notification(
         "Codex đã hoàn thành",
         "Codex đã hoàn thành lượt làm việc.",
         urgency="normal",
         sound_path=SOUND_COMPLETE,
         timeout=0,
+        session_id=session_id,
     )
 
 
 def handle_hook(payload):
     event = payload.get("hook_event_name") or payload.get("type")
+    session_id = payload.get("session_id") or payload.get("thread_id") or payload.get("turn_id") or ""
 
     if event == "PermissionRequest":
         tool_name = payload.get("tool_name") or "công cụ"
@@ -130,6 +134,7 @@ def handle_hook(payload):
             urgency="critical",
             sound_path=SOUND_WARNING,
             questions_json=q_json,
+            session_id=session_id,
         )
     elif event == "agent-turn-complete":
         handle_completion(payload)

@@ -27,12 +27,36 @@ if [[ "$payload" == *"Initializing imported session history"* ]]; then
     exit 0
 fi
 
-# 2. Fast-path: Ignore idle_prompt and non-actionable notifications
+event_name="$(printf '%s' "$payload" | $JQ -r '.hook_event_name // .event // ""' 2>/dev/null)"
+notif_type="$(printf '%s' "$payload" | $JQ -r '.notification_type // .type // .matcher // ""' 2>/dev/null)"
+session_id="$(printf '%s' "$payload" | $JQ -r '.session_id // .sessionID // .session // ""' 2>/dev/null)"
+cwd_path="$(printf '%s' "$payload" | $JQ -r '.cwd // ""' 2>/dev/null)"
+project_hint=""
+[ -n "$cwd_path" ] && project_hint="$(basename "$cwd_path" 2>/dev/null)"
+
+# 2. Early session capture (SessionStart event): Pure side-effect, capture window at startup (0ms)
+if [ "$event_name" = "SessionStart" ] || [ "$notif_type" = "SessionStart" ]; then
+    if [ -x "$MULTI_NOTIFY" ]; then
+        caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
+        caller_pid="$$"
+        terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
+        "$PYTHON3" "$MULTI_NOTIFY" \
+            --capture-session \
+            --session-id="$session_id" \
+            --window-id="$caller_window" \
+            --caller-pid="$caller_pid" \
+            --project-hint="$project_hint" \
+            --terminal-screen="$terminal_screen" </dev/null >/dev/null 2>&1 &
+    fi
+    exit 0
+fi
+
+# 3. Fast-path: Ignore idle_prompt and non-actionable notifications
 if [[ "$payload" == *"idle_prompt"* ]] || [[ "$payload" == *"agent_needs_input"* ]]; then
     exit 0
 fi
 
-# 3. Check for genuine events (Question, Permission, Completion)
+# 4. Check for genuine events (Question, Permission, Completion)
 is_question=0
 is_permission=0
 is_completion=0
@@ -49,9 +73,6 @@ fi
 if [ "$is_question" -eq 0 ] && [ "$is_permission" -eq 0 ] && [ "$is_completion" -eq 0 ]; then
     exit 0
 fi
-
-event_name="$(printf '%s' "$payload" | $JQ -r '.hook_event_name // .event // ""' 2>/dev/null)"
-notif_type="$(printf '%s' "$payload" | $JQ -r '.notification_type // .type // .matcher // ""' 2>/dev/null)"
 tool_name="$(printf '%s' "$payload" | $JQ -r '.tool_name // ""' 2>/dev/null)"
 
 title="Claude Code"
@@ -144,6 +165,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --caller-pid="$caller_pid" \
         --project-hint="$project_hint" \
         --terminal-screen="$terminal_screen" \
+        --session-id="$session_id" \
         --timeout="${timeout:-5}" </dev/null >/dev/null 2>&1 &
     disown
 fi

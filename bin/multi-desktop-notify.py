@@ -19,6 +19,130 @@ import sys
 import time
 
 PID_FILE = "/tmp/ai_agent_notifier.pid"
+SESSION_CACHE_FILE = "/tmp/ai_agent_notifier_sessions.json"
+DEDUPE_CACHE_FILE = "/tmp/ai_agent_notifier_dedupe.json"
+CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
+
+
+def save_session_window(session_id, window_id, project_hint="", pid=0):
+    """Caches target window ID for a session ID to enable 100% precision focus."""
+    if not session_id or not window_id:
+        return
+    sessions = {}
+    if os.path.exists(SESSION_CACHE_FILE):
+        try:
+            with open(SESSION_CACHE_FILE, "r") as f:
+                sessions = json.load(f)
+        except Exception:
+            sessions = {}
+    sessions[str(session_id)] = {
+        "window_id": str(window_id).strip(),
+        "project_hint": str(project_hint or "").strip(),
+        "pid": int(pid or 0),
+        "updated_at": time.time(),
+    }
+    now = time.time()
+    # Prune old sessions older than 24 hours
+    sessions = {k: v for k, v in sessions.items() if now - v.get("updated_at", 0) < 86400}
+    try:
+        with open(SESSION_CACHE_FILE, "w") as f:
+            json.dump(sessions, f)
+    except Exception:
+        pass
+
+
+def get_session_window(session_id):
+    """Retrieves cached window ID for a session."""
+    if not session_id or not os.path.exists(SESSION_CACHE_FILE):
+        return ""
+    try:
+        with open(SESSION_CACHE_FILE, "r") as f:
+            sessions = json.load(f)
+        s_info = sessions.get(str(session_id))
+        if s_info and isinstance(s_info, dict):
+            return s_info.get("window_id", "")
+        elif isinstance(s_info, str):
+            return s_info
+    except Exception:
+        pass
+    return ""
+
+
+def is_duplicate_notification(app_name, title, message, dedupe_seconds=2):
+    """Checks and sets deduplication state to prevent notification spam."""
+    if dedupe_seconds <= 0:
+        return False
+    import hashlib
+    key_raw = f"{app_name}|{title}|{message}"
+    key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    now = time.time()
+    dedupe_data = {}
+    if os.path.exists(DEDUPE_CACHE_FILE):
+        try:
+            with open(DEDUPE_CACHE_FILE, "r") as f:
+                dedupe_data = json.load(f)
+        except Exception:
+            dedupe_data = {}
+    # Prune expired keys (older than 60s)
+    dedupe_data = {k: v for k, v in dedupe_data.items() if now - v < 60}
+    last_time = dedupe_data.get(key, 0)
+    if now - last_time < dedupe_seconds:
+        return True
+    dedupe_data[key] = now
+    try:
+        with open(DEDUPE_CACHE_FILE, "w") as f:
+            json.dump(dedupe_data, f)
+    except Exception:
+        pass
+    return False
+
+
+def dispatch_webhooks_async(app_name, title, message):
+    """Dispatches webhooks asynchronously to external channels if configured."""
+    if not os.path.exists(CONFIG_FILE):
+        return
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            cfg = json.load(f)
+        webhooks = cfg.get("webhooks", {})
+        if not webhooks or not isinstance(webhooks, dict):
+            return
+
+        import threading
+        import urllib.parse
+        import urllib.request
+
+        def send_all():
+            payload_text = f"[{app_name}] {title}\n{message}"
+            for name, url in webhooks.items():
+                if not url or not str(url).startswith("http"):
+                    continue
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    if "feishu" in name.lower() or "lark" in name.lower():
+                        data = json.dumps({"msg_type": "text", "content": {"text": payload_text}}).encode()
+                    elif "dingtalk" in name.lower():
+                        data = json.dumps({"msgtype": "text", "text": {"content": payload_text}}).encode()
+                    elif "slack" in name.lower() or "discord" in name.lower():
+                        data = json.dumps({"text": payload_text}).encode()
+                    elif "bark" in name.lower():
+                        req = urllib.request.Request(f"{url.rstrip('/')}/{urllib.parse.quote(title)}/{urllib.parse.quote(message)}")
+                        urllib.request.urlopen(req, timeout=3)
+                        continue
+                    elif "ntfy" in name.lower():
+                        req = urllib.request.Request(url, data=message.encode("utf-8"), headers={"Title": title, "Priority": "urgent"})
+                        urllib.request.urlopen(req, timeout=3)
+                        continue
+                    else:
+                        data = json.dumps({"title": title, "message": message, "app": app_name}).encode()
+                    req = urllib.request.Request(url, data=data, headers=headers)
+                    urllib.request.urlopen(req, timeout=3)
+                except Exception:
+                    pass
+
+        threading.Thread(target=send_all, daemon=True).start()
+    except Exception:
+        pass
 
 
 def kill_previous_instance():
@@ -309,11 +433,17 @@ def get_all_managed_windows():
     return results
 
 
-def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen=""):
+def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen="", session_id=""):
     """
     Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
     that triggered the notification with 100% precision.
     """
+    # 0. Tier 0: Check session cache if session_id is provided
+    if session_id:
+        cached_wid = get_session_window(session_id)
+        if cached_wid and is_valid_toplevel_window(cached_wid):
+            return cached_wid
+
     project_hint = (project_hint or "").strip().lower()
     managed_windows = get_all_managed_windows()
 
@@ -325,26 +455,37 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
             if project_hint:
                 for wid, name in tree_windows:
                     if project_hint in name.lower():
+                        if session_id:
+                            save_session_window(session_id, wid, project_hint, caller_pid)
                         return wid
-            return tree_windows[0][0]
+            wid = tree_windows[0][0]
+            if session_id:
+                save_session_window(session_id, wid, project_hint, caller_pid)
+            return wid
 
     # 2. Tier 2: Match project_hint in window title across open developer windows
     # (Matches the specific VS Code workspace or Terminal project folder even if user switched away to browser)
     if project_hint:
         for wid, name, wpid in managed_windows:
             if project_hint in name.lower():
+                if session_id:
+                    save_session_window(session_id, wid, project_hint, wpid)
                 return wid
 
     # 3. Tier 3: Match window from TTY / pts if provided
     if caller_tty:
         tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
         if tty_window and is_valid_toplevel_window(tty_window):
+            if session_id:
+                save_session_window(session_id, tty_window, project_hint, caller_pid)
             return tty_window
 
     # 4. Tier 4: Explicit window_id_arg if valid
     if window_id_arg and str(window_id_arg).strip().isdigit():
         wid = str(window_id_arg).strip()
         if is_valid_toplevel_window(wid):
+            if session_id:
+                save_session_window(session_id, wid, project_hint, caller_pid)
             return wid
 
     # 5. Tier 5: Fallback to active window
@@ -352,6 +493,8 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
         res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
         active_wid = res.decode().strip()
         if active_wid and is_valid_toplevel_window(active_wid):
+            if session_id:
+                save_session_window(session_id, active_wid, project_hint, caller_pid)
             return active_wid
     except Exception:
         pass
@@ -441,7 +584,7 @@ def extract_summary_from_payload(questions_json_raw, fallback_message):
     return fallback_message
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint=""):
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id=""):
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         return
 
@@ -557,6 +700,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
                     window_id_arg="",
                     caller_pid=caller_pid,
                     project_hint=project_hint,
+                    session_id=session_id,
                 )
             if wid_to_focus:
                 focus_target_window(wid_to_focus)
@@ -711,28 +855,53 @@ def main():
     parser.add_argument("--project-hint", default="")
     parser.add_argument("--caller-tty", default="")
     parser.add_argument("--terminal-screen", default="")
+    parser.add_argument("--session-id", default="")
+    parser.add_argument("--capture-session", action="store_true", default=False)
+    parser.add_argument("--dedupe-seconds", type=int, default=2)
 
     args = parser.parse_args()
 
+    # 0. Session capture mode (Pure side-effect, 0ms execution without rendering UI)
+    if args.capture_session:
+        target_wid = find_target_window(
+            window_id_arg=args.window_id,
+            caller_pid=args.caller_pid,
+            project_hint=args.project_hint,
+            caller_tty=args.caller_tty,
+            terminal_screen=args.terminal_screen,
+            session_id=args.session_id,
+        )
+        if target_wid and args.session_id:
+            save_session_window(args.session_id, target_wid, args.project_hint, args.caller_pid)
+        return
+
     message = clean_text(args.message)
 
-    # 1. Kill previous popup instance if running
+    # 1. Deduplication check (Skip duplicate notification spam)
+    if is_duplicate_notification(args.app_name, args.title, message, args.dedupe_seconds):
+        return
+
+    # 2. Kill previous popup instance if running
     kill_previous_instance()
 
-    # 2. Find target window to focus
+    # 3. Find target window to focus
     target_window_id = find_target_window(
         window_id_arg=args.window_id,
         caller_pid=args.caller_pid,
         project_hint=args.project_hint,
         caller_tty=args.caller_tty,
         terminal_screen=args.terminal_screen,
+        session_id=args.session_id,
     )
 
-    # 3. Play sound asynchronously
+    # 4. Play sound asynchronously
     if args.sound:
         play_sound_async(args.sound)
 
-    # 4. Display desktop popup on connected monitors
+    # 5. Dispatch optional webhooks asynchronously
+    dispatch_webhooks_async(args.app_name, args.title, message)
+
+    # 6. Display desktop popup on connected monitors
     show_multi_monitor_popup(
         args.app_name,
         args.title,
@@ -742,6 +911,7 @@ def main():
         timeout=args.timeout,
         caller_pid=args.caller_pid,
         project_hint=args.project_hint,
+        session_id=args.session_id,
     )
 
 
