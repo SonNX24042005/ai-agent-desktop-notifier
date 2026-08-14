@@ -76,15 +76,21 @@ anoti uninstall
 
 ---
 
-## Cập nhật và gỡ cài đặt từ xa qua `curl`
+## Cập nhật từ xa qua `curl`
 
-Nếu không đứng trong thư mục dự án, bạn cũng có thể cập nhật hoặc gỡ cài đặt qua 1 dòng lệnh:
+Chạy lệnh sau để cập nhật hệ thống lên phiên bản mới nhất:
 
 ```bash
-# Cập nhật nhanh
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash
+```
 
-# Gỡ cài đặt nhanh
+---
+
+## Gỡ cài đặt từ xa qua `curl`
+
+Chạy lệnh sau để gỡ bỏ toàn bộ script thông báo và khôi phục file cấu hình sạch sẽ:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash
 ```
 
