@@ -6,18 +6,18 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
 
 ## Tính năng nổi bật
 
-- 🖥️ **Hiển thị trên tất cả màn hình**: Tự động nhận diện toàn bộ màn hình đang kết nối qua Xinerama / XRandR và hiển thị popup thông báo đồng thời trên từng màn hình, kèm âm thanh cảnh báo hệ thống.
-- 🎯 **Tự động focus cửa sổ thông minh (6 tầng nhận diện)**:
+- **Hiển thị trên tất cả màn hình**: Tự động nhận diện toàn bộ màn hình đang kết nối qua Xinerama / XRandR và hiển thị popup thông báo đồng thời trên từng màn hình, kèm âm thanh cảnh báo hệ thống.
+- **Tự động focus cửa sổ thông minh (6 tầng nhận diện)**:
   - **Tầng 0 (Session cache)**: Bắt và lưu ID cửa sổ ngay khi phiên làm việc khởi động (`SessionStart`), đảm bảo tìm lại đúng cửa sổ dù người dùng đã chuyển sang ứng dụng khác.
   - **Tầng 1 (Cây tiến trình PID)**: Lần ngược cây PID cha/ông (`/proc/{pid}/stat`) và thư mục dự án để tìm cửa sổ terminal/IDE tương ứng.
   - **Tầng 2 (Khớp tiêu đề cửa sổ)**: Tìm kiếm tên thư mục dự án trên tiêu đề các cửa sổ X11.
   - **Tầng 3 (VTE title marker)**: Ghi ký tự điều khiển định danh vào TTY và quét các tab D-Bus của GNOME Terminal.
   - **Tầng 4 (Window ID trực tiếp)**: Nhận diện qua tham số `--window-id`.
   - **Tầng 5 (Cửa sổ đang hoạt động)**: Dự phòng lấy cửa sổ đang active qua `xdotool`.
-- 🔕 **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
-- 📡 **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
-- ⌨️ **Tương tác nhanh**: Nhấn trực tiếp vào popup, nhấn nút *"Đến cửa sổ ứng dụng"*, hoặc dùng phím tắt `Enter` / `Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi.
-- ⚡ **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
+- **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
+- **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
+- **Tương tác nhanh**: Nhấn trực tiếp vào popup, nhấn nút *"Đến cửa sổ ứng dụng"*, hoặc dùng phím tắt `Enter` / `Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi.
+- **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
 
 ---
 

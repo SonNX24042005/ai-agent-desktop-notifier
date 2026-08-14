@@ -36,10 +36,10 @@ def get_repo_dir() -> Path | None:
 
 def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."):
     """Sends a test desktop notification across all connected monitors."""
-    print("🔔 Sending test desktop notification across all monitors...")
+    print("[INFO] Dang gui thong bao thu nghiem len tat ca cac man hinh...")
     if not NOTIFIER_PY.exists():
-        print(f"⚠️ Notifier engine not found at {NOTIFIER_PY}.")
-        print("💡 Run 'anoti install' to install it first.")
+        print(f"[ERROR] Engine thong bao khong ton tai tai {NOTIFIER_PY}.")
+        print("[HINT] Chay 'anoti install' de cai dat.")
         return 1
 
     cmd = [
@@ -52,19 +52,19 @@ def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo h
     ]
     res = subprocess.run(cmd)
     if res.returncode == 0:
-        print("✓ Notification sent successfully!")
+        print("[OK] Da gui thong bao thanh cong.")
     return res.returncode
 
 
 def cmd_status():
     """Checks the integration status for Claude Code, Antigravity, and Codex."""
     print("=" * 60)
-    print(f"✨ anoti (AI Agent Desktop Notifier) v{VERSION}")
+    print(f"anoti (AI Agent Desktop Notifier) v{VERSION}")
     print("=" * 60)
 
     # 1. Engine
     engine_ok = NOTIFIER_PY.exists() and os.access(str(NOTIFIER_PY), os.X_OK)
-    print(f"⚙️  Core Engine:       {'✓ Installed (' + str(NOTIFIER_PY) + ')' if engine_ok else '✗ Not installed'}")
+    print(f"- Core Engine:       {'[OK] Da cai dat (' + str(NOTIFIER_PY) + ')' if engine_ok else '[ERROR] Chua cai dat'}")
 
     # 2. Claude Code
     claude_settings = USER_HOME / ".claude" / "settings.json"
@@ -77,7 +77,7 @@ def cmd_status():
             claude_ok = "hooks" in data
         except Exception:
             pass
-    print(f"🤖 Claude Code:       {'✓ Integrated & Active' if claude_ok else '○ Not configured / Not present'}")
+    print(f"- Claude Code:       {'[OK] Da tich hop hook' if claude_ok else '[-] Chua cau hinh'}")
 
     # 3. Antigravity
     gemini_hooks = USER_HOME / ".gemini" / "config" / "hooks.json"
@@ -90,7 +90,7 @@ def cmd_status():
             gemini_ok = "desktop-notifier" in data
         except Exception:
             pass
-    print(f"🌌 Antigravity:       {'✓ Integrated & Active' if gemini_ok else '○ Not configured / Not present'}")
+    print(f"- Antigravity:       {'[OK] Da tich hop hook' if gemini_ok else '[-] Chua cau hinh'}")
 
     # 4. Codex
     codex_toml = USER_HOME / ".codex" / "config.toml"
@@ -103,11 +103,11 @@ def cmd_status():
             codex_ok = "notify.py" in content
         except Exception:
             pass
-    print(f"🧠 OpenAI Codex:      {'✓ Integrated & Active' if codex_ok else '○ Not configured / Not present'}")
+    print(f"- OpenAI Codex:      {'[OK] Da tich hop hook' if codex_ok else '[-] Chua cau hinh'}")
 
     # 5. Webhooks
     webhook_ok = CONFIG_FILE.exists()
-    print(f"📡 Remote Webhooks:   {'✓ Configured (' + str(CONFIG_FILE) + ')' if webhook_ok else '○ Not configured (Optional)'}")
+    print(f"- Remote Webhooks:   {'[OK] Da cau hinh (' + str(CONFIG_FILE) + ')' if webhook_ok else '[-] Chua cau hinh (Tuy chon)'}")
 
     print("=" * 60)
     return 0
@@ -115,7 +115,7 @@ def cmd_status():
 
 def cmd_update():
     """Updates AI Agent Desktop Notifier to the latest version."""
-    print("🔄 Updating AI Agent Desktop Notifier...")
+    print("[INFO] Dang cap nhat AI Agent Desktop Notifier...")
     repo_dir = get_repo_dir()
 
     if repo_dir and (repo_dir / "update.sh").exists():
@@ -131,7 +131,7 @@ def cmd_update():
 
 def cmd_uninstall():
     """Uninstalls AI Agent Desktop Notifier and restores configuration backups."""
-    print("🗑️  Uninstalling AI Agent Desktop Notifier...")
+    print("[INFO] Dang go cai dat AI Agent Desktop Notifier...")
     repo_dir = get_repo_dir()
 
     if repo_dir and (repo_dir / "uninstall.sh").exists():
@@ -147,7 +147,7 @@ def cmd_uninstall():
 
 def cmd_install():
     """Installs or re-installs AI Agent Desktop Notifier."""
-    print("📦 Installing AI Agent Desktop Notifier...")
+    print("[INFO] Dang cai dat AI Agent Desktop Notifier...")
     repo_dir = get_repo_dir()
 
     if repo_dir and (repo_dir / "install.sh").exists():
@@ -177,14 +177,14 @@ def cmd_config():
         }
         with open(CONFIG_FILE, "w") as f:
             json.dump(template, f, indent=2)
-        print(f"✓ Created sample webhook configuration at {CONFIG_FILE}")
+        print(f"[OK] Da tao tep cau hinh mau tai {CONFIG_FILE}")
 
-    print(f"📄 Webhook config path: {CONFIG_FILE}")
+    print(f"Duong dan tep cau hinh webhook: {CONFIG_FILE}")
     try:
         with open(CONFIG_FILE, "r") as f:
             print(f.read())
     except Exception as e:
-        print(f"Error reading config: {e}")
+        print(f"Loi doc tep cau hinh: {e}")
     return 0
 
 
@@ -291,12 +291,12 @@ def main():
 
     # If no arguments provided, show status & help
     cmd_status()
-    print("\n💡 Quick commands:")
-    print("   anoti update       # Update to latest version")
-    print("   anoti test         # Test notification on all screens")
-    print("   anoti status       # Check integration status")
-    print("   anoti uninstall    # Uninstall & restore configs")
-    print("   anoti --help       # Show all options\n")
+    print("\nCac lenh nhanh:")
+    print("   anoti update       # Cap nhat phien ban moi nhat")
+    print("   anoti test         # Ban thong bao thu nghiem")
+    print("   anoti status       # Kiem tra trang thai tich hop")
+    print("   anoti uninstall    # Go cai dat va khoi phuc cau hinh")
+    print("   anoti --help       # Xem danh sach tuy chon\n")
 
 
 if __name__ == "__main__":
