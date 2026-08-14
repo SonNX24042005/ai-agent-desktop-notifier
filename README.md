@@ -1,49 +1,45 @@
-# Multi-agent desktop notifier for Ubuntu
+# AI agent desktop notifier (anoti)
 
-A lightweight, non-blocking multi-monitor audio-visual desktop notification and window-focusing system for AI coding assistants on Ubuntu Linux (supports Claude Code, OpenAI Codex, and Google Antigravity).
-
----
-
-## Features
-
-- **Multi-monitor display**: Automatically detects all connected monitors (X11 / GNOME) and renders floating popup banners at the top-center of every monitor simultaneously.
-- **Session-based early window capture**: Records and caches the exact workspace window at session start (`SessionStart`) with PID ancestry verification, ensuring 100% focus precision even when you switch to other applications or workspaces during long-running tasks.
-- **Hierarchical window resolution (6 tiers)**: Accurately identifies the target workspace among multiple open instances:
-  - Tier 0: Session cache (`session_id` lookup)
-  - Tier 1: Process ancestry tree (`/proc/{pid}/stat`) + project directory hint
-  - Tier 2: Workspace title matching across open IDE / terminal windows
-  - Tier 3: Terminal pts device control (VTE title stack push & pop marker) + GNOME Terminal D-Bus tab switching
-  - Tier 4: Explicit caller window ID
-  - Tier 5: Fallback active window
-- **Direct app window focus**: Clicking anywhere on the notification banner or clicking the **"Đến cửa sổ ứng dụng"** button instantly focuses and brings to front the exact workspace window via native GDK and X11/EWMH (`_NET_ACTIVE_WINDOW`).
-- **Smart anti-spam deduplication**: Deduplicates identical notifications within a configurable cooldown period (`--dedupe-seconds`, default 2s) to prevent UI flicker.
-- **Multi-channel webhooks (optional)**: Forwards notifications to mobile channels (Feishu/Lark, DingTalk, Slack, Discord, Bark iOS, ntfy) via `~/.config/ai-agent-notifier/config.json`.
-- **Audio alerts**: Plays subtle audio cues (`dialog-warning.oga` for questions/permission requests and `complete.oga` for task completions) asynchronously without blocking the AI agent loop.
-- **Non-destructive config merger**: Automatically updates hook configurations while preserving all pre-existing permissions, models, MCP servers, plugins, and trusted workspace settings.
+Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notification overlay) kết hợp tự động chuyển đổi tiêu điểm cửa sổ (auto focus window) dành cho các công cụ AI coding agent: **Claude Code**, **Google Antigravity**, và **OpenAI Codex** trên môi trường Linux (X11 / GNOME).
 
 ---
 
-## Supported AI coding agents
+## Tính năng nổi bật
 
-1. **Claude Code** (via `~/.claude/settings.json` lifecycle hooks)
-2. **OpenAI Codex** (via `~/.codex/config.toml` `notify` & `~/.codex/hooks.json`)
-3. **Google Antigravity** (via `~/.gemini/config/hooks.json` lifecycle hooks)
+- 🖥️ **Hiển thị trên tất cả màn hình**: Tự động nhận diện toàn bộ màn hình đang kết nối qua Xinerama / XRandR và hiển thị popup thông báo đồng thời trên từng màn hình, kèm âm thanh cảnh báo hệ thống.
+- 🎯 **Tự động focus cửa sổ thông minh (6 tầng nhận diện)**:
+  - **Tầng 0 (Session cache)**: Bắt và lưu ID cửa sổ ngay khi phiên làm việc khởi động (`SessionStart`), đảm bảo tìm lại đúng cửa sổ dù người dùng đã chuyển sang ứng dụng khác.
+  - **Tầng 1 (Cây tiến trình PID)**: Lần ngược cây PID cha/ông (`/proc/{pid}/stat`) và thư mục dự án để tìm cửa sổ terminal/IDE tương ứng.
+  - **Tầng 2 (Khớp tiêu đề cửa sổ)**: Tìm kiếm tên thư mục dự án trên tiêu đề các cửa sổ X11.
+  - **Tầng 3 (VTE title marker)**: Ghi ký tự điều khiển định danh vào TTY và quét các tab D-Bus của GNOME Terminal.
+  - **Tầng 4 (Window ID trực tiếp)**: Nhận diện qua tham số `--window-id`.
+  - **Tầng 5 (Cửa sổ đang hoạt động)**: Dự phòng lấy cửa sổ đang active qua `xdotool`.
+- 🔕 **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
+- 📡 **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
+- ⌨️ **Tương tác nhanh**: Nhấn trực tiếp vào popup, nhấn nút *"Đến cửa sổ ứng dụng"*, hoặc dùng phím tắt `Enter` / `Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi.
+- ⚡ **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
 
 ---
 
-## Quick start & installation
+## Hỗ trợ các AI agent
 
-### 1-line quick installation (recommended)
+1. **Claude Code** (tích hợp qua các hook vòng đời trong `~/.claude/settings.json`: `SessionStart`, `PreToolUse: AskUserQuestion`, `Notification`, `Stop`).
+2. **OpenAI Codex** (tích hợp qua cấu hình `notify` trong `~/.codex/config.toml` và `PermissionRequest` trong `~/.codex/hooks.json`).
+3. **Google Antigravity** (tích hợp qua hook vòng đời `desktop-notifier` trong `~/.gemini/config/hooks.json`).
 
-Run this command in your terminal:
+---
+
+## Cài đặt nhanh
+
+### Cách 1: Cài đặt nhanh 1 dòng lệnh (khuyên dùng)
+
+Chạy lệnh sau trên terminal của bạn:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash
 ```
 
-### Manual installation
-
-Alternatively, clone the repository and run `install.sh`:
+### Cách 2: Cài đặt thủ công từ mã nguồn
 
 ```bash
 git clone https://github.com/SonNX24042005/ai-agent-desktop-notifier.git
@@ -52,62 +48,62 @@ chmod +x install.sh
 ./install.sh
 ```
 
-After installation, reload your VS Code window:
+Sau khi cài đặt xong, hãy tải lại cửa sổ VS Code / IDE của bạn:
 > `Ctrl + Shift + P` -> `Developer: Reload Window`
 
 ---
 
-## Updating the notification system
+## Hướng dẫn sử dụng bộ lệnh `anoti`
 
-You can update the notification system anytime using any of the following methods:
-
-### Method 1: Run update script from repository
+Sau khi cài đặt, bạn có thể gọi lệnh `anoti` từ bất kỳ thư mục nào trên máy:
 
 ```bash
-./update.sh
-```
+# 1. Cập nhật hệ thống thông báo lên bản mới nhất
+anoti update
+# hoặc dùng cờ ngắn:
+anoti -u
 
-### Method 2: 1-line update via curl
+# 2. Kiểm tra trạng thái tích hợp của các AI agent
+anoti status
+# hoặc:
+anoti -s
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash
-```
+# 3. Bắn thử thông báo kiểm tra lên tất cả màn hình
+anoti test
+# hoặc:
+anoti -t
 
-### Method 3: Using the `--update` flag
+# 4. Xem hoặc tạo file cấu hình webhook (Slack, Discord, Bark, ntfy,...)
+anoti config
+# hoặc:
+anoti -c
 
-```bash
-~/.local/bin/multi-desktop-notify.py --update
+# 5. Bắn thông báo tùy chỉnh từ terminal hoặc shell script
+anoti --title "Xong việc" --message "Tiến trình build đã hoàn tất sau 45 giây"
+
+# 6. Gỡ cài đặt hệ thống thông báo và khôi phục file cấu hình sạch sẽ
+anoti uninstall
 ```
 
 ---
 
-## Uninstallation
+## Cập nhật và gỡ cài đặt từ xa qua `curl`
 
-To remove all notification scripts and restore your previous configurations:
-
-### Method 1: Run uninstallation script
+Nếu không đứng trong thư mục dự án, bạn cũng có thể cập nhật hoặc gỡ cài đặt qua 1 dòng lệnh:
 
 ```bash
-./uninstall.sh
-```
+# Cập nhật nhanh
+curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash
 
-### Method 2: 1-line uninstallation via curl
-
-```bash
+# Gỡ cài đặt nhanh
 curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash
 ```
 
-### Method 3: Using the `--uninstall` flag
-
-```bash
-~/.local/bin/multi-desktop-notify.py --uninstall
-```
-
 ---
 
-## Optional webhook configuration
+## Cấu hình webhook (tùy chọn)
 
-To forward notifications to mobile apps or team chat channels when you are away from your desk, create `~/.config/ai-agent-notifier/config.json`:
+Để nhận thông báo trên điện thoại hoặc nhóm chat khi bạn không ngồi trước máy tính, tạo file `~/.config/ai-agent-notifier/config.json` (hoặc chạy lệnh `anoti config`):
 
 ```json
 {
@@ -124,49 +120,50 @@ To forward notifications to mobile apps or team chat channels when you are away 
 
 ---
 
-## Repository structure
+## Cấu trúc thư mục dự án
 
 ```
 ai-agent-desktop-notifier/
 ├── bin/
-│   └── multi-desktop-notify.py   # Multi-monitor PyGObject GTK popup & window focus engine
+│   ├── anoti                     # Công cụ CLI quản lý (update, test, status, uninstall)
+│   └── multi-desktop-notify.py   # Engine popup PyGObject GTK đa màn hình và focus cửa sổ
 ├── hooks/
-│   ├── claude-notify.sh          # Lifecycle hook handler for Claude Code
-│   ├── codex-notify.py           # Notification handler for OpenAI Codex
-│   └── antigravity-notify.sh     # Lifecycle hook handler for Google Antigravity
-├── install.sh                    # One-command installer & config merger
-├── update.sh                     # Automated updater & config syncer
-├── uninstall.sh                  # Uninstaller & backup restorer
-├── README.md                     # Documentation
+│   ├── claude-notify.sh          # Script xử lý hook vòng đời cho Claude Code
+│   ├── codex-notify.py           # Script xử lý thông báo cho OpenAI Codex
+│   └── antigravity-notify.sh     # Script xử lý hook vòng đời cho Google Antigravity
+├── install.sh                    # Kịch bản cài đặt tự động và hợp nhất cấu hình
+├── update.sh                     # Kịch bản cập nhật tự động và đồng bộ cấu hình
+├── uninstall.sh                  # Kịch bản gỡ cài đặt và khôi phục cấu hình ban đầu
+├── README.md                     # Tài liệu hướng dẫn sử dụng
 ├── .gitignore
 └── LICENSE
 ```
 
 ---
 
-## Testing notifications manually
+## Kiểm tra thông báo thủ công
 
-You can test notifications on all your screens anytime by running:
+Bạn có thể chạy thử thông báo trực tiếp cho từng loại agent:
 
 ```bash
-# Test Claude Code question notification
-echo '{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Test question on all screens?"}]}}' | ~/.claude/hooks/notify-input.sh
+# Kiểm tra thông báo câu hỏi của Claude Code
+echo '{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Câu hỏi thử nghiệm trên tất cả màn hình?"}]}}' | ~/.claude/hooks/notify-input.sh
 
-# Test Claude Code session start capture
+# Kiểm tra cơ chế bắt phiên sớm của Claude Code
 echo '{"hook_event_name":"SessionStart","session_id":"test-session-001"}' | ~/.claude/hooks/notify-input.sh
 
-# Test Codex completion notification
-~/.codex/notify.py '{"type":"agent-turn-complete","last-assistant-message":"Codex completed task!"}'
+# Kiểm tra thông báo hoàn thành của Codex
+~/.codex/notify.py '{"type":"agent-turn-complete","last-assistant-message":"Codex đã hoàn thành nhiệm vụ!"}'
 
-# Test Antigravity question notification
-echo '{"toolCall":{"name":"ask_question","args":{"questions":[{"question":"Antigravity test on all screens!"}]}}}' | ~/.gemini/hooks/notify-antigravity.sh
+# Kiểm tra thông báo câu hỏi của Antigravity
+echo '{"toolCall":{"name":"ask_question","args":{"questions":[{"question":"Antigravity cần phản hồi từ bạn!"}]}}}' | ~/.gemini/hooks/notify-antigravity.sh
 
-# Test Antigravity completion notification
+# Kiểm tra thông báo hoàn thành của Antigravity
 echo '{"terminationReason":"model_stop"}' | ~/.gemini/hooks/notify-antigravity.sh
 ```
 
 ---
 
-## License
+## Giấy phép
 
-This project is licensed under the MIT License.
+Dự án được phân phối theo giấy phép mã nguồn mở [MIT License](file:///mnt/181EC3061EC2DBBE/DT/Code/PJ/ai-agent-desktop-notifier/LICENSE).

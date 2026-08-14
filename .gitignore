@@ -1,7 +1,25 @@
+# Byte-compiled / optimized files
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
-*.bak
-.idea/
+*.py[cod]
+*$py.class
+
+# IDE and Editor files
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Reference docs & external cloned projects
+docs/reference/
+reference/
+
+# CodeGraph local indexing
+.codegraph/
+
+# Temporary / Log files / Backups
+*.log
+*.bak
+*.tmp
+.env

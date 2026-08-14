@@ -46,6 +46,11 @@ chmod +x "$CODEX_DIR/notify.py"
 cp "$SCRIPT_DIR/hooks/antigravity-notify.sh" "$GEMINI_HOOKS/notify-antigravity.sh"
 chmod +x "$GEMINI_HOOKS/notify-antigravity.sh"
 
+if [ -f "$SCRIPT_DIR/bin/anoti" ]; then
+    cp "$SCRIPT_DIR/bin/anoti" "$LOCAL_BIN/anoti"
+    chmod +x "$LOCAL_BIN/anoti"
+fi
+
 echo "=== 3. Syncing configuration files safely ==="
 python3 -c '
 import json, os

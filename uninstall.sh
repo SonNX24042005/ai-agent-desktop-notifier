@@ -88,8 +88,7 @@ if os.path.exists(codex_hooks):
 
 echo "=== 2. Removing notification scripts & caches ==="
 rm -f "$LOCAL_BIN/multi-desktop-notify.py"
-rm -f "$LOCAL_BIN/a2a-notify"
-rm -f "$LOCAL_BIN/ai-agent-notifier-update"
+rm -f "$LOCAL_BIN/anoti"
 rm -f "$CLAUDE_HOOKS/notify-input.sh"
 rm -f "$CODEX_DIR/notify.py"
 rm -f "$GEMINI_HOOKS/notify-antigravity.sh"

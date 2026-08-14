@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+anoti - AI Agent Desktop Notifier CLI
+
+Fast, modern, and ergonomic command-line tool for managing, updating,
+testing, and triggering multi-monitor AI desktop notifications.
+"""
+
+import os
+import sys
+import json
+import argparse
+import subprocess
+from pathlib import Path
+
+VERSION = "1.2.0"
+USER_HOME = Path(os.environ.get("HOME") or os.path.expanduser("~"))
+LOCAL_BIN = USER_HOME / ".local" / "bin"
+NOTIFIER_PY = LOCAL_BIN / "multi-desktop-notify.py"
+CONFIG_FILE = USER_HOME / ".config" / "ai-agent-notifier" / "config.json"
+REPO_URL = "https://github.com/SonNX24042005/ai-agent-desktop-notifier.git"
+
+
+def get_repo_dir() -> Path | None:
+    """Finds the local repository directory if available."""
+    script_path = Path(os.path.realpath(__file__))
+    if (script_path.parent / "install.sh").exists():
+        return script_path.parent
+    if (script_path.parent.parent / "install.sh").exists():
+        return script_path.parent.parent
+    known_path = Path("/mnt/181EC3061EC2DBBE/DT/Code/PJ/ai-agent-desktop-notifier")
+    if (known_path / "install.sh").exists():
+        return known_path
+    return None
+
+
+def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."):
+    """Sends a test desktop notification across all connected monitors."""
+    print("🔔 Sending test desktop notification across all monitors...")
+    if not NOTIFIER_PY.exists():
+        print(f"⚠️ Notifier engine not found at {NOTIFIER_PY}.")
+        print("💡 Run 'anoti install' to install it first.")
+        return 1
+
+    cmd = [
+        str(NOTIFIER_PY),
+        "--app-name=AI Agent Notifier",
+        f"--title={title}",
+        f"--message={message}",
+        "--sound=/usr/share/sounds/freedesktop/stereo/complete.oga",
+        "--timeout=4",
+    ]
+    res = subprocess.run(cmd)
+    if res.returncode == 0:
+        print("✓ Notification sent successfully!")
+    return res.returncode
+
+
+def cmd_status():
+    """Checks the integration status for Claude Code, Antigravity, and Codex."""
+    print("=" * 60)
+    print(f"✨ anoti (AI Agent Desktop Notifier) v{VERSION}")
+    print("=" * 60)
+
+    # 1. Engine
+    engine_ok = NOTIFIER_PY.exists() and os.access(str(NOTIFIER_PY), os.X_OK)
+    print(f"⚙️  Core Engine:       {'✓ Installed (' + str(NOTIFIER_PY) + ')' if engine_ok else '✗ Not installed'}")
+
+    # 2. Claude Code
+    claude_settings = USER_HOME / ".claude" / "settings.json"
+    claude_hook = USER_HOME / ".claude" / "hooks" / "notify-input.sh"
+    claude_ok = False
+    if claude_settings.exists() and claude_hook.exists():
+        try:
+            with open(claude_settings, "r") as f:
+                data = json.load(f)
+            claude_ok = "hooks" in data
+        except Exception:
+            pass
+    print(f"🤖 Claude Code:       {'✓ Integrated & Active' if claude_ok else '○ Not configured / Not present'}")
+
+    # 3. Antigravity
+    gemini_hooks = USER_HOME / ".gemini" / "config" / "hooks.json"
+    gemini_script = USER_HOME / ".gemini" / "hooks" / "notify-antigravity.sh"
+    gemini_ok = False
+    if gemini_hooks.exists() and gemini_script.exists():
+        try:
+            with open(gemini_hooks, "r") as f:
+                data = json.load(f)
+            gemini_ok = "desktop-notifier" in data
+        except Exception:
+            pass
+    print(f"🌌 Antigravity:       {'✓ Integrated & Active' if gemini_ok else '○ Not configured / Not present'}")
+
+    # 4. Codex
+    codex_toml = USER_HOME / ".codex" / "config.toml"
+    codex_script = USER_HOME / ".codex" / "notify.py"
+    codex_ok = False
+    if codex_toml.exists() and codex_script.exists():
+        try:
+            with open(codex_toml, "r") as f:
+                content = f.read()
+            codex_ok = "notify.py" in content
+        except Exception:
+            pass
+    print(f"🧠 OpenAI Codex:      {'✓ Integrated & Active' if codex_ok else '○ Not configured / Not present'}")
+
+    # 5. Webhooks
+    webhook_ok = CONFIG_FILE.exists()
+    print(f"📡 Remote Webhooks:   {'✓ Configured (' + str(CONFIG_FILE) + ')' if webhook_ok else '○ Not configured (Optional)'}")
+
+    print("=" * 60)
+    return 0
+
+
+def cmd_update():
+    """Updates AI Agent Desktop Notifier to the latest version."""
+    print("🔄 Updating AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if repo_dir and (repo_dir / "update.sh").exists():
+        update_script = repo_dir / "update.sh"
+        res = subprocess.run(["bash", str(update_script)])
+        return res.returncode
+
+    # Fallback to online curl update
+    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash"]
+    res = subprocess.run(cmd)
+    return res.returncode
+
+
+def cmd_uninstall():
+    """Uninstalls AI Agent Desktop Notifier and restores configuration backups."""
+    print("🗑️  Uninstalling AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if repo_dir and (repo_dir / "uninstall.sh").exists():
+        uninstall_script = repo_dir / "uninstall.sh"
+        res = subprocess.run(["bash", str(uninstall_script)])
+        return res.returncode
+
+    # Fallback to online curl uninstall
+    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash"]
+    res = subprocess.run(cmd)
+    return res.returncode
+
+
+def cmd_install():
+    """Installs or re-installs AI Agent Desktop Notifier."""
+    print("📦 Installing AI Agent Desktop Notifier...")
+    repo_dir = get_repo_dir()
+
+    if repo_dir and (repo_dir / "install.sh").exists():
+        install_script = repo_dir / "install.sh"
+        res = subprocess.run(["bash", str(install_script)])
+        return res.returncode
+
+    # Fallback to online curl install
+    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash"]
+    res = subprocess.run(cmd)
+    return res.returncode
+
+
+def cmd_config():
+    """Views or edits the webhook configuration."""
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        template = {
+            "webhooks": {
+                "slack": "",
+                "discord": "",
+                "bark": "",
+                "ntfy": "",
+                "feishu": "",
+                "dingtalk": ""
+            }
+        }
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(template, f, indent=2)
+        print(f"✓ Created sample webhook configuration at {CONFIG_FILE}")
+
+    print(f"📄 Webhook config path: {CONFIG_FILE}")
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            print(f.read())
+    except Exception as e:
+        print(f"Error reading config: {e}")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("update", "up"):
+        sys.exit(cmd_update())
+    elif argv and argv[0] in ("uninstall", "remove", "rm"):
+        sys.exit(cmd_uninstall())
+    elif argv and argv[0] in ("install", "reinstall"):
+        sys.exit(cmd_install())
+    elif argv and argv[0] in ("test", "t"):
+        title = argv[1] if len(argv) > 1 else "Kiểm tra thông báo"
+        msg = argv[2] if len(argv) > 2 else "Hệ thống thông báo hoạt động bình thường trên tất cả các màn hình."
+        sys.exit(cmd_test(title, msg))
+    elif argv and argv[0] in ("status", "st", "info"):
+        sys.exit(cmd_status())
+    elif argv and argv[0] in ("config", "cfg"):
+        sys.exit(cmd_config())
+
+    parser = argparse.ArgumentParser(
+        prog="anoti",
+        description="anoti - Fast, multi-monitor desktop notification CLI for AI agents (Claude Code, Antigravity, Codex).",
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        choices=["update", "uninstall", "install", "test", "status", "config"],
+        help="Action to perform (update, uninstall, install, test, status, config)",
+    )
+    parser.add_argument(
+        "--update", "-u",
+        dest="flag_update",
+        action="store_true",
+        help="Update notification system to the latest version.",
+    )
+    parser.add_argument(
+        "--uninstall",
+        dest="flag_uninstall",
+        action="store_true",
+        help="Uninstall notification system and restore backups.",
+    )
+    parser.add_argument(
+        "--install",
+        dest="flag_install",
+        action="store_true",
+        help="Install or re-install notification system.",
+    )
+    parser.add_argument(
+        "--test", "-t",
+        dest="flag_test",
+        action="store_true",
+        help="Send a test desktop notification across all monitors.",
+    )
+    parser.add_argument(
+        "--status", "-s",
+        dest="flag_status",
+        action="store_true",
+        help="Show integration and health status.",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        dest="flag_config",
+        action="store_true",
+        help="View or setup webhook configuration.",
+    )
+    parser.add_argument(
+        "--title",
+        default="AI Agent Notification",
+        help="Notification title for custom message.",
+    )
+    parser.add_argument(
+        "--message", "-m",
+        default="",
+        help="Notification body text for custom message.",
+    )
+    parser.add_argument(
+        "--version", "-v",
+        action="store_true",
+        help="Show anoti version.",
+    )
+
+    args = parser.parse_args()
+
+    if args.version:
+        print(f"anoti v{VERSION}")
+        sys.exit(0)
+
+    if args.flag_update or args.action == "update":
+        sys.exit(cmd_update())
+    if args.flag_uninstall or args.action == "uninstall":
+        sys.exit(cmd_uninstall())
+    if args.flag_install or args.action == "install":
+        sys.exit(cmd_install())
+    if args.flag_test or args.action == "test":
+        sys.exit(cmd_test())
+    if args.flag_status or args.action == "status":
+        sys.exit(cmd_status())
+    if args.flag_config or args.action == "config":
+        sys.exit(cmd_config())
+
+    if args.message:
+        sys.exit(cmd_test(args.title, args.message))
+
+    # If no arguments provided, show status & help
+    cmd_status()
+    print("\n💡 Quick commands:")
+    print("   anoti update       # Update to latest version")
+    print("   anoti test         # Test notification on all screens")
+    print("   anoti status       # Check integration status")
+    print("   anoti uninstall    # Uninstall & restore configs")
+    print("   anoti --help       # Show all options\n")
+
+
+if __name__ == "__main__":
+    main()
