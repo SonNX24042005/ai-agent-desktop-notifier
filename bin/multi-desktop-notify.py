@@ -23,6 +23,24 @@ SESSION_CACHE_FILE = "/tmp/ai_agent_notifier_sessions.json"
 DEDUPE_CACHE_FILE = "/tmp/ai_agent_notifier_dedupe.json"
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
 
+# Ensure DISPLAY and XAUTHORITY are available in background hook processes
+if not os.environ.get("DISPLAY"):
+    for disp in [":1", ":0"]:
+        if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
+            os.environ["DISPLAY"] = disp
+            break
+    else:
+        os.environ["DISPLAY"] = ":1"
+
+if not os.environ.get("XAUTHORITY"):
+    if os.path.exists("/run/user/1000/gdm/Xauthority"):
+        os.environ["XAUTHORITY"] = "/run/user/1000/gdm/Xauthority"
+    elif os.path.exists(os.path.expanduser("~/.Xauthority")):
+        os.environ["XAUTHORITY"] = os.path.expanduser("~/.Xauthority")
+
+if not os.environ.get("XDG_RUNTIME_DIR"):
+    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
 
 def save_session_window(session_id, window_id, project_hint="", pid=0):
     """Caches target window ID for a session ID to enable 100% precision focus."""

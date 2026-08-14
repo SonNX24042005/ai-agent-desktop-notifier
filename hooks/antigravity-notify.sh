@@ -121,8 +121,26 @@ sys.stdout.flush()
 
 # 6. Trigger popup asynchronously
 if os.path.exists(MULTI_NOTIFY) and os.access(MULTI_NOTIFY, os.X_OK):
+    env = os.environ.copy()
+    if not env.get("DISPLAY"):
+        for disp in [":1", ":0"]:
+            if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
+                env["DISPLAY"] = disp
+                break
+        else:
+            env["DISPLAY"] = ":1"
+
+    if not env.get("XAUTHORITY"):
+        if os.path.exists("/run/user/1000/gdm/Xauthority"):
+            env["XAUTHORITY"] = "/run/user/1000/gdm/Xauthority"
+        elif os.path.exists(os.path.expanduser("~/.Xauthority")):
+            env["XAUTHORITY"] = os.path.expanduser("~/.Xauthority")
+
+    if not env.get("XDG_RUNTIME_DIR"):
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
     try:
-        caller_win = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1).stdout.strip()
+        caller_win = subprocess.run(["xdotool", "getactivewindow"], capture_output=True, text=True, timeout=1, env=env).stdout.strip()
     except Exception:
         caller_win = ""
     cmd = [
@@ -139,6 +157,6 @@ if os.path.exists(MULTI_NOTIFY) and os.access(MULTI_NOTIFY, os.X_OK):
         f"--session-id={conversation_id}",
         f"--timeout={timeout}",
     ]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 sys.exit(0)
