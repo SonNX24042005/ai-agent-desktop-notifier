@@ -15,6 +15,7 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
   - **Tầng 3 (VTE title marker)**: Ghi ký tự điều khiển định danh vào TTY và quét các tab D-Bus của GNOME Terminal.
   - **Tầng 4 (Window ID trực tiếp)**: Nhận diện qua tham số `--window-id`.
   - **Tầng 5 (Cửa sổ đang hoạt động)**: Dự phòng lấy cửa sổ đang active qua `xdotool`.
+- **Hàng đợi thông báo thông minh giữa nhiều cửa sổ (multi-window notification queue)**: Khi có nhiều thông báo từ các cửa sổ / phiên làm việc AI agent khác nhau, hệ thống tự động lưu vào hàng đợi kèm số đếm trạng thái (ví dụ: `[1/3]`). Sau khi giải quyết xong cửa sổ hiện tại, hệ thống sẽ tự động bật lại thông báo còn tồn đọng của cửa sổ tiếp theo để bạn không bao giờ bị bỏ sót tác vụ.
 - **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
 - **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
 - **Tương tác nhanh**: Nhấn trực tiếp vào popup, nhấn nút *"Đến cửa sổ ứng dụng"*, hoặc dùng phím tắt `Enter` / `Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi.

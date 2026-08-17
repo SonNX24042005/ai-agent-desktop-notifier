@@ -21,6 +21,7 @@ import time
 PID_FILE = "/tmp/ai_agent_notifier.pid"
 SESSION_CACHE_FILE = "/tmp/ai_agent_notifier_sessions.json"
 DEDUPE_CACHE_FILE = "/tmp/ai_agent_notifier_dedupe.json"
+QUEUE_CACHE_FILE = "/tmp/ai_agent_notifier_queue.json"
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
 
 # Ensure DISPLAY and XAUTHORITY are available in background hook processes
@@ -539,6 +540,140 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     return ""
 
 
+def get_queue_key(session_id="", window_id="", caller_pid=0, project_hint=""):
+    """Generates a stable key for a window/session to track pending notifications."""
+    if session_id and str(session_id).strip():
+        s = str(session_id).strip()
+        return s if s.startswith("sess_") else f"sess_{s}"
+    if window_id and str(window_id).strip().isdigit():
+        w = str(window_id).strip()
+        return w if w.startswith("win_") else f"win_{w}"
+    if caller_pid and int(caller_pid) > 0:
+        return f"pid_{int(caller_pid)}"
+    if project_hint and str(project_hint).strip():
+        p = str(project_hint).strip().lower()
+        return p if p.startswith("proj_") else f"proj_{p}"
+    return "default_item"
+
+
+def load_notification_queue():
+    """Loads all pending notifications from disk, pruning expired entries (> 24h)."""
+    if not os.path.exists(QUEUE_CACHE_FILE):
+        return {}
+    now = time.time()
+    try:
+        with open(QUEUE_CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            valid_queue = {}
+            for k, v in data.items():
+                if isinstance(v, dict) and (now - v.get("created_at", 0) < 86400):
+                    valid_queue[k] = v
+            return valid_queue
+    except Exception:
+        pass
+    return {}
+
+
+def save_to_queue(key, notif_dict):
+    """Saves or updates a pending notification in the queue."""
+    if not key or not notif_dict:
+        return
+    queue = load_notification_queue()
+    queue[key] = notif_dict
+    try:
+        with open(QUEUE_CACHE_FILE, "w") as f:
+            json.dump(queue, f)
+    except Exception:
+        pass
+
+
+def remove_from_queue(key):
+    """Removes a notification from the pending queue when resolved or dismissed."""
+    if not key:
+        return
+    queue = load_notification_queue()
+    if key in queue:
+        del queue[key]
+        try:
+            with open(QUEUE_CACHE_FILE, "w") as f:
+                json.dump(queue, f)
+        except Exception:
+            pass
+
+
+def get_next_pending_notification(exclude_key=""):
+    """
+    Returns the next pending notification from another window/session in the queue.
+    Prefers the oldest pending notification (FIFO) to ensure fairness across multiple agent tasks.
+    """
+    queue = load_notification_queue()
+    pending = []
+    for k, v in queue.items():
+        if k != exclude_key and isinstance(v, dict):
+            wid = v.get("target_window_id")
+            if wid and not is_valid_toplevel_window(wid):
+                refound_wid = find_target_window(
+                    window_id_arg="",
+                    caller_pid=v.get("caller_pid", 0),
+                    project_hint=v.get("project_hint", ""),
+                    session_id=v.get("session_id", ""),
+                )
+                if refound_wid:
+                    v["target_window_id"] = refound_wid
+                    pending.append((v.get("created_at", 0), k, v))
+                else:
+                    remove_from_queue(k)
+                    continue
+            else:
+                pending.append((v.get("created_at", 0), k, v))
+
+    if not pending:
+        return None, None
+
+    pending.sort(key=lambda x: x[0])
+    _, next_key, next_item = pending[0]
+    return next_key, next_item
+
+
+def pop_next_notification_async(exclude_key=""):
+    """Asynchronously triggers the next pending notification from another window using a detached subshell."""
+    next_key, next_item = get_next_pending_notification(exclude_key=exclude_key)
+    if not next_item:
+        return
+
+    import shlex
+
+    cmd = [
+        sys.executable,
+        os.path.abspath(__file__),
+        f"--app-name={next_item.get('app_name', 'AI Agent')}",
+        f"--title={next_item.get('title', 'Notification')}",
+        f"--message={next_item.get('message', '')}",
+        f"--questions-json={next_item.get('questions_json', '')}",
+        f"--urgency={next_item.get('urgency', 'normal')}",
+        f"--window-id={next_item.get('target_window_id', '')}",
+        f"--caller-pid={next_item.get('caller_pid', 0)}",
+        f"--project-hint={next_item.get('project_hint', '')}",
+        f"--session-id={next_item.get('session_id', '')}",
+        f"--timeout={next_item.get('timeout', 0)}",
+        f"--sound={next_item.get('sound', '')}",
+        "--from-queue",
+    ]
+    try:
+        cmd_str = " ".join(shlex.quote(c) for c in cmd)
+        subprocess.Popen(
+            ["bash", "-c", f"(sleep 0.25 && exec {cmd_str}) >/dev/null 2>&1 &"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception:
+        pass
+
+
 def get_window_workspace(wid):
     """
     Returns the workspace (desktop index) where the window currently resides.
@@ -769,7 +904,7 @@ def is_boilerplate_message(text, tag_class):
     return False
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id=""):
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key=""):
     display_text = extract_summary_from_payload(questions_json, message)
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -822,6 +957,14 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             font-size: 11px;
             font-weight: bold;
             letter-spacing: 0.5px;
+        }}
+        .queue-badge {{
+            color: #a1a1aa;
+            font-size: 11px;
+            font-weight: bold;
+            background-color: #27272a;
+            border-radius: 4px;
+            padding: 1px 6px;
         }}
         .tag-question {{
             color: #fbbf24;
@@ -893,6 +1036,11 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             if wid_to_focus:
                 focus_target_window(wid_to_focus)
 
+            if queue_key:
+                remove_from_queue(queue_key)
+
+            pop_next_notification_async(exclude_key=queue_key)
+
             for w in windows:
                 try:
                     w.hide()
@@ -902,6 +1050,11 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             GLib.timeout_add(60, Gtk.main_quit)
 
         def handle_close_only():
+            if queue_key:
+                remove_from_queue(queue_key)
+
+            pop_next_notification_async(exclude_key=queue_key)
+
             for w in windows:
                 try:
                     w.hide()
@@ -981,6 +1134,16 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             header_box.pack_start(lbl_agent, False, False, 0)
             header_box.pack_start(lbl_cat, False, False, 0)
+
+            # Queue counter badge if multiple windows have pending notifications
+            queue = load_notification_queue()
+            total_in_queue = len(queue)
+            if total_in_queue > 1:
+                queue_keys = list(queue.keys())
+                current_idx = (queue_keys.index(queue_key) + 1) if queue_key in queue_keys else 1
+                lbl_queue = Gtk.Label(label=f"[{current_idx}/{total_in_queue}]")
+                lbl_queue.get_style_context().add_class("queue-badge")
+                header_box.pack_end(lbl_queue, False, False, 0)
 
             vbox_main.pack_start(header_box, False, False, 0)
 
@@ -1063,6 +1226,7 @@ def main():
     parser.add_argument("--terminal-screen", default="")
     parser.add_argument("--session-id", default="")
     parser.add_argument("--capture-session", action="store_true", default=False)
+    parser.add_argument("--from-queue", action="store_true", default=False, help="Indicates notification was popped from pending queue.")
     parser.add_argument("--dedupe-seconds", type=int, default=2)
     parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
     parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
@@ -1117,8 +1281,8 @@ def main():
 
     message = clean_text(args.message)
 
-    # 2. Deduplication check (Skip duplicate notification spam)
-    if is_duplicate_notification(args.app_name, args.title, message, args.dedupe_seconds):
+    # 2. Deduplication check (Skip duplicate notification spam unless popped from queue)
+    if not args.from_queue and is_duplicate_notification(args.app_name, args.title, message, args.dedupe_seconds):
         return
 
     # 2. Kill previous popup instance if running
@@ -1134,14 +1298,44 @@ def main():
         session_id=args.session_id,
     )
 
-    # 4. Play sound asynchronously
+    # 4. Manage pending notification queue
+    queue_key = get_queue_key(
+        session_id=args.session_id,
+        window_id=target_window_id,
+        caller_pid=args.caller_pid,
+        project_hint=args.project_hint,
+    )
+
+    is_completion = any(k in args.title.lower() for k in ["hoàn thành", "complete", "finish", "done", "thành công"])
+
+    if not is_completion:
+        notif_item = {
+            "key": queue_key,
+            "app_name": args.app_name,
+            "title": args.title,
+            "message": message,
+            "questions_json": args.questions_json,
+            "urgency": args.urgency,
+            "sound": args.sound,
+            "target_window_id": target_window_id,
+            "caller_pid": args.caller_pid,
+            "project_hint": args.project_hint,
+            "session_id": args.session_id,
+            "timeout": args.timeout,
+            "created_at": time.time(),
+        }
+        save_to_queue(queue_key, notif_item)
+    else:
+        remove_from_queue(queue_key)
+
+    # 5. Play sound asynchronously
     if args.sound:
         play_sound_async(args.sound)
 
-    # 5. Dispatch optional webhooks asynchronously
+    # 6. Dispatch optional webhooks asynchronously
     dispatch_webhooks_async(args.app_name, args.title, message)
 
-    # 6. Display desktop popup on connected monitors
+    # 7. Display desktop popup on connected monitors
     show_multi_monitor_popup(
         args.app_name,
         args.title,
@@ -1152,6 +1346,7 @@ def main():
         caller_pid=args.caller_pid,
         project_hint=args.project_hint,
         session_id=args.session_id,
+        queue_key=queue_key,
     )
 
 
