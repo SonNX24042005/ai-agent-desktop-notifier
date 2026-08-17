@@ -539,9 +539,106 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     return ""
 
 
+def get_window_workspace(wid):
+    """
+    Returns the workspace (desktop index) where the window currently resides.
+    Returns:
+        int: workspace index >= 0
+        -1: window is sticky (present on all workspaces)
+        None: workspace could not be determined
+    """
+    if not wid:
+        return None
+    wid_str = str(wid).strip()
+    if not wid_str.isdigit():
+        return None
+
+    # 1. Try xdotool get_desktop_for_window
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "get_desktop_for_window", wid_str],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        if out.lstrip("-").isdigit():
+            desk = int(out)
+            return desk
+    except Exception:
+        pass
+
+    # 2. Try xprop _NET_WM_DESKTOP
+    try:
+        out = subprocess.check_output(
+            ["xprop", "-id", wid_str, "_NET_WM_DESKTOP"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+        if "=" in out:
+            val = out.split("=")[1].strip()
+            if val.isdigit():
+                desk = int(val)
+                if desk == 4294967295 or desk == 0xFFFFFFFF:
+                    return -1
+                return desk
+    except Exception:
+        pass
+
+    return None
+
+
+def switch_to_window_workspace(wid):
+    """
+    Switches current workspace/virtual desktop to the workspace containing the window.
+    """
+    if not wid:
+        return False
+    wid_str = str(wid).strip()
+    if not wid_str.isdigit():
+        return False
+
+    target_desk = get_window_workspace(wid_str)
+    # If target workspace is sticky (-1), no need to switch workspace
+    if target_desk == -1:
+        return True
+
+    # 1. Try xdotool set_desktop_to_window
+    try:
+        subprocess.run(
+            ["xdotool", "set_desktop_to_window", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    # 2. Fallback to explicit workspace switch if target_desk is a non-negative number
+    if target_desk is not None and target_desk >= 0:
+        try:
+            subprocess.run(
+                ["xdotool", "set_desktop", str(target_desk)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+        try:
+            subprocess.run(
+                ["wmctrl", "-s", str(target_desk)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    return True
+
+
 def focus_target_window(window_id):
     """
-    Activates and brings to front the specified window ID using GDK native and xdotool / EWMH.
+    Activates and brings to front the specified window ID using workspace switching,
+    GDK native and xdotool / EWMH.
     """
     if not window_id:
         return False
@@ -551,6 +648,10 @@ def focus_target_window(window_id):
         return False
 
     wid_int = int(wid_str)
+
+    # 0. Switch to window's workspace first so the window is visible
+    switch_to_window_workspace(wid_str)
+    time.sleep(0.05)
 
     # 1. Native GDK / GdkX11 focus
     try:
@@ -567,7 +668,18 @@ def focus_target_window(window_id):
     except Exception:
         pass
 
-    # 2. Xdotool windowactivate, windowraise, and windowfocus
+    # 2. Try wmctrl -i -a (EWMH standard activation with workspace switch support)
+    try:
+        subprocess.run(
+            ["wmctrl", "-i", "-a", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+    # 3. Xdotool windowactivate, windowraise, and windowfocus
     try:
         subprocess.run(["xdotool", "windowactivate", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["xdotool", "windowraise", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -621,13 +733,47 @@ def extract_summary_from_payload(questions_json_raw, fallback_message):
     return fallback_message
 
 
+def is_boilerplate_message(text, tag_class):
+    """Checks if message is redundant boilerplate that should be hidden in compact mode."""
+    if not text or not str(text).strip():
+        return True
+    cleaned = str(text).strip().lower()
+
+    if tag_class == "tag-complete":
+        if any(k in cleaned for k in ["hoàn thành", "complete", "finish", "done", "thành công"]):
+            return True
+
+    boilerplate_phrases = [
+        "đã hoàn thành",
+        "hoàn thành trả lời",
+        "hoàn thành công việc",
+        "hoàn thành nhiệm vụ",
+        "hoàn thành lượt làm việc",
+        "completed",
+        "finished",
+        "đang chờ bạn",
+        "đang chờ bạn tương tác",
+        "đang đặt câu hỏi cho bạn",
+        "cần bạn chú ý",
+        "ai agent đang chờ",
+    ]
+
+    for phrase in boilerplate_phrases:
+        if cleaned == phrase:
+            return True
+        if cleaned.startswith(phrase) or cleaned.endswith(phrase):
+            words = [w for w in cleaned.replace(".", "").replace("!", "").split() if w not in ["antigravity", "claude", "codex", "gemini", "agent", "ai"]]
+            if not words or " ".join(words) in boilerplate_phrases or any(" ".join(words).startswith(p) for p in boilerplate_phrases):
+                return True
+
+    return False
+
+
 def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id=""):
     display_text = extract_summary_from_payload(questions_json, message)
-    if not display_text:
-        display_text = "AI Agent đang chờ bạn tương tác."
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
+        send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
         return
 
     try:
@@ -637,13 +783,13 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         gi.require_version("Pango", "1.0")
         from gi.repository import Gdk, GLib, Gtk, Pango
     except Exception:
-        send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
+        send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
         return
 
     try:
         display = Gdk.Display.get_default()
         if not display:
-            send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
+            send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
             return
         n_monitors = display.get_n_monitors()
 
@@ -664,7 +810,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             border-radius: 14px;
         }}
         .banner-box {{
-            padding: 12px 16px;
+            padding: 10px 16px;
         }}
         .agent-badge {{
             color: #60a5fa;
@@ -697,6 +843,8 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         .msg-text {{
             color: {msg_color};
             font-size: 13px;
+            margin-top: 2px;
+            margin-bottom: 2px;
         }}
         button.focus-btn {{
             background-color: #2563eb;
@@ -753,6 +901,15 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             GLib.timeout_add(60, Gtk.main_quit)
 
+        def handle_close_only():
+            for w in windows:
+                try:
+                    w.hide()
+                except Exception:
+                    pass
+
+            GLib.timeout_add(60, Gtk.main_quit)
+
         for i in range(n_monitors):
             monitor = display.get_monitor(i)
             geom = monitor.get_geometry()
@@ -773,12 +930,25 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.set_skip_pager_hint(True)
             win.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
             win.set_role("notification-popup")
+            win.stick()
 
-            # EventBox to capture clicks anywhere on the banner
+            def make_sticky(w, data=None):
+                try:
+                    w.stick()
+                    gw = w.get_window()
+                    if gw and hasattr(gw, "stick"):
+                        gw.stick()
+                except Exception:
+                    pass
+
+            win.connect("realize", make_sticky)
+            win.connect("map", make_sticky)
+
+            # EventBox to capture clicks on card background (close without focus)
             event_box = Gtk.EventBox()
             event_box.set_visible_window(True)
             event_box.get_style_context().add_class("notification-card")
-            event_box.connect("button-press-event", lambda w, e: handle_focus_and_close())
+            event_box.connect("button-press-event", lambda w, e: handle_close_only())
 
             vbox_main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             vbox_main.get_style_context().add_class("banner-box")
@@ -814,20 +984,15 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             vbox_main.pack_start(header_box, False, False, 0)
 
-            # Title & Cleaned Message Text
-            lbl_title = Gtk.Label(label=title, xalign=0)
-            lbl_title.get_style_context().add_class("topic-title")
-            lbl_title.set_ellipsize(Pango.EllipsizeMode.END)
-
-            escaped_msg = GLib.markup_escape_text(clean_text(display_text, limit=260))
-            lbl_msg = Gtk.Label(xalign=0)
-            lbl_msg.get_style_context().add_class("msg-text")
-            lbl_msg.set_markup(escaped_msg)
-            lbl_msg.set_line_wrap(True)
-            lbl_msg.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-
-            vbox_main.pack_start(lbl_title, False, False, 0)
-            vbox_main.pack_start(lbl_msg, False, False, 0)
+            # Show message text only when it contains meaningful custom content (questions, permissions, etc.)
+            if not is_boilerplate_message(display_text, tag_class):
+                escaped_msg = GLib.markup_escape_text(clean_text(display_text, limit=260))
+                lbl_msg = Gtk.Label(xalign=0)
+                lbl_msg.get_style_context().add_class("msg-text")
+                lbl_msg.set_markup(escaped_msg)
+                lbl_msg.set_line_wrap(True)
+                lbl_msg.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                vbox_main.pack_start(lbl_msg, False, False, 0)
 
             # Action Buttons Row
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -839,7 +1004,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             btn_close = Gtk.Button(label="✕ Đóng")
             btn_close.get_style_context().add_class("close-btn")
-            btn_close.connect("clicked", lambda b: Gtk.main_quit())
+            btn_close.connect("clicked", lambda b: handle_close_only())
 
             btn_box.pack_start(btn_focus, False, False, 0)
             btn_box.pack_end(btn_close, False, False, 0)
@@ -865,16 +1030,17 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
                     handle_focus_and_close()
                     return True
                 if event.keyval == Gdk.KEY_Escape:
-                    Gtk.main_quit()
+                    handle_close_only()
                     return True
                 return False
 
             win.connect("key-press-event", on_key_press)
             win.show_all()
+            win.stick()
             windows.append(win)
 
         if timeout > 0:
-            GLib.timeout_add_seconds(timeout, Gtk.main_quit)
+            GLib.timeout_add_seconds(timeout, handle_close_only)
 
         Gtk.main()
     except Exception:

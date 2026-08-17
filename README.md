@@ -6,8 +6,9 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
 
 ## Tính năng nổi bật
 
-- **Hiển thị trên tất cả màn hình**: Tự động nhận diện toàn bộ màn hình đang kết nối qua Xinerama / XRandR và hiển thị popup thông báo đồng thời trên từng màn hình, kèm âm thanh cảnh báo hệ thống.
-- **Tự động focus cửa sổ thông minh (6 tầng nhận diện)**:
+- **Hiển thị trên tất cả màn hình và mọi không gian làm việc**: Tự động nhận diện toàn bộ màn hình đang kết nối qua Xinerama / XRandR, ghim hiển thị xuyên suốt trên tất cả các workspace / virtual desktop (sticky window), kèm âm thanh cảnh báo hệ thống.
+- **Tự động chuyển workspace và focus cửa sổ thông minh (6 tầng nhận diện)**:
+  - **Tự động chuyển đúng không gian làm việc (workspace)**: Nhận diện không gian làm việc chứa cửa sổ ứng dụng và tự động chuyển màn hình sang đúng workspace đó trước khi kích hoạt cửa sổ.
   - **Tầng 0 (Session cache)**: Bắt và lưu ID cửa sổ ngay khi phiên làm việc khởi động (`SessionStart`), đảm bảo tìm lại đúng cửa sổ dù người dùng đã chuyển sang ứng dụng khác.
   - **Tầng 1 (Cây tiến trình PID)**: Lần ngược cây PID cha/ông (`/proc/{pid}/stat`) và thư mục dự án để tìm cửa sổ terminal/IDE tương ứng.
   - **Tầng 2 (Khớp tiêu đề cửa sổ)**: Tìm kiếm tên thư mục dự án trên tiêu đề các cửa sổ X11.
