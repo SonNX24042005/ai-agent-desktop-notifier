@@ -97,6 +97,21 @@ if os.path.exists(codex_hooks):
             print("✓ Cleaned PermissionRequest from Codex hooks.json")
     except Exception:
         pass
+
+# 6. Clean up GNOME global shortcut and restore default window menu
+try:
+    import subprocess, ast
+    target_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/"
+    subprocess.run(["gsettings", "set", "org.gnome.desktop.wm.keybindings", "activate-window-menu", "['<Alt>space']"], check=False)
+    out = subprocess.check_output(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], stderr=subprocess.DEVNULL).decode().strip()
+    bindings = ast.literal_eval(out) if out and out != "@as []" else []
+    if target_path in bindings:
+        bindings.remove(target_path)
+        subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", str(bindings)], check=False)
+        subprocess.run(["gsettings", "reset-recursively", f"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{target_path}"], check=False)
+        print("✓ Removed Alt+Space global shortcut and restored default window menu")
+except Exception:
+    pass
 '
 
 echo "=== 2. Removing notification scripts & caches ==="

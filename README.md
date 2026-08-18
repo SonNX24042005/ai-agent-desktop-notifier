@@ -18,8 +18,10 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
 - **Hàng đợi thông báo thông minh giữa nhiều cửa sổ (multi-window notification queue)**: Khi có nhiều thông báo từ các cửa sổ / phiên làm việc AI agent khác nhau, hệ thống tự động lưu vào hàng đợi kèm số đếm trạng thái (ví dụ: `[1/3]`). Sau khi giải quyết xong cửa sổ hiện tại, hệ thống sẽ tự động bật lại thông báo còn tồn đọng của cửa sổ tiếp theo để bạn không bao giờ bị bỏ sót tác vụ.
 - **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
 - **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
-- **Tương tác nhanh**: Nhấn trực tiếp vào popup, nhấn nút *"Đến cửa sổ ứng dụng"*, hoặc dùng phím tắt `Enter` / `Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi.
-- **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
+- **Tương tác nhanh & Phím tắt toàn cục (`Alt + Space`)**:
+  - **Phím tắt toàn cục hệ thống (`Alt + Space`)**: Đang làm việc ở bất kỳ đâu (lướt web, đọc tài liệu, soạn thảo), chỉ cần bấm `Alt + Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi mà không cần chạm vào chuột.
+  - **Tương tác trực tiếp trên popup**: Nhấn nút *"Đến cửa sổ [Alt+Space]"*, hoặc dùng phím tắt `Enter` / `Space` / `F` để chuyển vào ứng dụng, `Esc` / `Q` để đóng popup.
+- **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để focus cửa sổ, cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
 
 ---
 
@@ -49,30 +51,35 @@ Sau khi cài đặt xong, hãy tải lại cửa sổ VS Code / IDE của bạn:
 Sau khi cài đặt, bạn có thể gọi lệnh `anoti` từ bất kỳ thư mục nào trên máy:
 
 ```bash
-# 1. Cập nhật hệ thống thông báo lên bản mới nhất
+# 1. Chuyển ngay đến cửa sổ AI agent đang chờ phản hồi (hoặc dùng phím tắt Alt + Space)
+anoti focus
+# hoặc dùng cờ ngắn:
+anoti -f
+
+# 2. Cập nhật hệ thống thông báo lên bản mới nhất
 anoti update
 # hoặc dùng cờ ngắn:
 anoti -u
 
-# 2. Kiểm tra trạng thái tích hợp của các AI agent
+# 3. Kiểm tra trạng thái tích hợp và phím tắt toàn cục
 anoti status
 # hoặc:
 anoti -s
 
-# 3. Bắn thử thông báo kiểm tra lên tất cả màn hình
+# 4. Bắn thử thông báo kiểm tra lên tất cả màn hình
 anoti test
 # hoặc:
 anoti -t
 
-# 4. Xem hoặc tạo file cấu hình webhook (Slack, Discord, Bark, ntfy,...)
+# 5. Xem hoặc tạo file cấu hình webhook (Slack, Discord, Bark, ntfy,...)
 anoti config
 # hoặc:
 anoti -c
 
-# 5. Bắn thông báo tùy chỉnh từ terminal hoặc shell script
+# 6. Bắn thông báo tùy chỉnh từ terminal hoặc shell script
 anoti --title "Xong việc" --message "Tiến trình build đã hoàn tất sau 45 giây"
 
-# 6. Gỡ cài đặt hệ thống thông báo và khôi phục file cấu hình sạch sẽ
+# 7. Gỡ cài đặt hệ thống thông báo và khôi phục file cấu hình sạch sẽ
 anoti uninstall
 ```
 

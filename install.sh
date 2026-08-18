@@ -208,6 +208,39 @@ gdata["desktop-notifier"] = {
 with open(gemini_hooks_file, "w") as f:
     json.dump(gdata, f, indent=2)
 print("✓ Merged Antigravity hooks.json (~/.gemini/config/hooks.json)")
+
+# 4. Register GNOME global shortcut (Alt+Space)
+try:
+    import subprocess, ast
+    anoti_bin = os.path.join(USER_HOME, ".local", "bin", "anoti")
+    target_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/"
+    
+    # Disable activate-window-menu if it conflicts with <Alt>space
+    try:
+        out = subprocess.check_output(["gsettings", "get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"], stderr=subprocess.DEVNULL).decode().strip()
+        if "<Alt>space" in out:
+            subprocess.run(["gsettings", "set", "org.gnome.desktop.wm.keybindings", "activate-window-menu", "[]"], check=False)
+            print("✓ Freed <Alt>space from activate-window-menu")
+    except Exception:
+        pass
+
+    try:
+        out = subprocess.check_output(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], stderr=subprocess.DEVNULL).decode().strip()
+        bindings = ast.literal_eval(out) if out and out != "@as []" else []
+    except Exception:
+        bindings = []
+
+    if target_path not in bindings:
+        bindings.append(target_path)
+        subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", str(bindings)], check=False)
+
+    schema_id = f"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{target_path}"
+    subprocess.run(["gsettings", "set", schema_id, "name", "Focus AI Agent (anoti)"], check=False)
+    subprocess.run(["gsettings", "set", schema_id, "command", f"{anoti_bin} focus"], check=False)
+    subprocess.run(["gsettings", "set", schema_id, "binding", "<Alt>space"], check=False)
+    print("✓ Registered Alt+Space global shortcut for anoti focus")
+except Exception:
+    pass
 '
 
 echo "=== 5. Installation Complete! ==="
@@ -215,6 +248,7 @@ echo "Testing desktop notification on all screens..."
 "$LOCAL_BIN/multi-desktop-notify.py" \
     --app-name="AI Agent Notifier" \
     --title="Cài đặt thành công!" \
-    --message="Hệ thống thông báo đa màn hình kèm âm thanh đã sẵn sàng." \
+    --message="Hệ thống thông báo đa màn hình kèm âm thanh và phím tắt Alt+Space đã sẵn sàng." \
     --sound="/usr/share/sounds/freedesktop/stereo/complete.oga" \
     --timeout=4
+

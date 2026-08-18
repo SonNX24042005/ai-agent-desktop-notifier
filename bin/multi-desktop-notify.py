@@ -824,6 +824,65 @@ def focus_target_window(window_id):
         return False
 
 
+def focus_active_or_queued_notification():
+    """
+    Directly focuses the application window of the currently active or oldest pending notification.
+    Pops the next notification from queue if available.
+    """
+    queue = load_notification_queue()
+    if queue:
+        pending = []
+        for k, v in queue.items():
+            if isinstance(v, dict):
+                pending.append((v.get("created_at", 0), k, v))
+        pending.sort(key=lambda x: x[0])
+
+        for _, k, item in pending:
+            wid = item.get("target_window_id", "")
+            if not wid or not is_valid_toplevel_window(wid):
+                wid = find_target_window(
+                    window_id_arg="",
+                    caller_pid=item.get("caller_pid", 0),
+                    project_hint=item.get("project_hint", ""),
+                    session_id=item.get("session_id", ""),
+                )
+            if wid and is_valid_toplevel_window(wid):
+                remove_from_queue(k)
+                kill_previous_instance()
+                focus_target_window(wid)
+                pop_next_notification_async(exclude_key=k)
+                return 0
+            else:
+                remove_from_queue(k)
+
+    # Fallback if queue is empty: check session cache
+    if os.path.exists(SESSION_CACHE_FILE):
+        try:
+            with open(SESSION_CACHE_FILE, "r") as f:
+                sessions = json.load(f)
+            valid_sessions = []
+            for sid, sinfo in sessions.items():
+                if isinstance(sinfo, dict) and sinfo.get("window_id"):
+                    valid_sessions.append((sinfo.get("updated_at", 0), sinfo.get("window_id")))
+            valid_sessions.sort(key=lambda x: x[0], reverse=True)
+            for _, wid in valid_sessions:
+                if is_valid_toplevel_window(wid):
+                    kill_previous_instance()
+                    focus_target_window(wid)
+                    return 0
+        except Exception:
+            pass
+
+    # Final fallback: try to find any active developer window
+    managed = get_all_managed_windows()
+    for wid, name, _ in managed:
+        if any(dev in name.lower() for dev in ["visual studio code", "code", "terminal", "alacritty", "kitty"]):
+            focus_target_window(wid)
+            return 0
+
+    return 1
+
+
 def extract_summary_from_payload(questions_json_raw, fallback_message):
     """Extracts clean text summary from payload if questions JSON provided."""
     data = None
@@ -1161,11 +1220,11 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             btn_box.set_margin_top(4)
 
-            btn_focus = Gtk.Button(label="Đến cửa sổ ứng dụng")
+            btn_focus = Gtk.Button(label="Đến cửa sổ [Alt+Space]")
             btn_focus.get_style_context().add_class("focus-btn")
             btn_focus.connect("clicked", lambda b: handle_focus_and_close())
 
-            btn_close = Gtk.Button(label="✕ Đóng")
+            btn_close = Gtk.Button(label="✕ Đóng [Esc]")
             btn_close.get_style_context().add_class("close-btn")
             btn_close.connect("clicked", lambda b: handle_close_only())
 
@@ -1189,10 +1248,10 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.connect("size-allocate", lambda w, alloc, gx=geom.x, gw=geom.width, gy=geom.y: on_size_allocate(w, alloc, gx, gw, gy))
 
             def on_key_press(w, event):
-                if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space, Gdk.KEY_f, Gdk.KEY_F, Gdk.KEY_y, Gdk.KEY_Y):
                     handle_focus_and_close()
                     return True
-                if event.keyval == Gdk.KEY_Escape:
+                if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_q, Gdk.KEY_Q, Gdk.KEY_n, Gdk.KEY_N):
                     handle_close_only()
                     return True
                 return False
@@ -1226,6 +1285,7 @@ def main():
     parser.add_argument("--terminal-screen", default="")
     parser.add_argument("--session-id", default="")
     parser.add_argument("--capture-session", action="store_true", default=False)
+    parser.add_argument("--focus", "-f", action="store_true", default=False, help="Focus the target application window waiting for input.")
     parser.add_argument("--from-queue", action="store_true", default=False, help="Indicates notification was popped from pending queue.")
     parser.add_argument("--dedupe-seconds", type=int, default=2)
     parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
@@ -1233,6 +1293,10 @@ def main():
     parser.add_argument("--install", action="store_true", default=False, help="Install notification system into current user profile.")
 
     args, _ = parser.parse_known_args()
+
+    # 0. Global focus command
+    if args.focus:
+        sys.exit(focus_active_or_queued_notification())
 
     # 0. Lifecycle management flags (update / uninstall / install)
     if args.update:
