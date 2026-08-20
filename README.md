@@ -16,11 +16,12 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
   - **Tầng 4 (Window ID trực tiếp)**: Nhận diện qua tham số `--window-id`.
   - **Tầng 5 (Cửa sổ đang hoạt động)**: Dự phòng lấy cửa sổ đang active qua `xdotool`.
 - **Hàng đợi thông báo thông minh giữa nhiều cửa sổ (multi-window notification queue)**: Khi có nhiều thông báo từ các cửa sổ / phiên làm việc AI agent khác nhau, hệ thống tự động lưu vào hàng đợi kèm số đếm trạng thái (ví dụ: `[1/3]`). Sau khi giải quyết xong cửa sổ hiện tại, hệ thống sẽ tự động bật lại thông báo còn tồn đọng của cửa sổ tiếp theo để bạn không bao giờ bị bỏ sót tác vụ.
+- **Tự động đóng khi người dùng chủ động mở cửa sổ (auto-dismiss on active window)**: Khi popup đang hiển thị mà bạn tự chuyển vào cửa sổ AI agent (qua chuột, thanh tác vụ hoặc `Alt + Tab`), hệ thống sẽ tự động phát hiện cửa sổ mục tiêu đã được kích hoạt và tự động đóng popup sau 1.5 giây, dọn hàng đợi mà không cần bạn phải thao tác đóng thủ công.
 - **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
 - **Chuyển tiếp đa kênh (webhooks)**: Gửi thông báo ngầm đến điện thoại hoặc kênh chat nhóm (Slack, Discord, Bark iOS, ntfy, Feishu, DingTalk) khi bạn rời khỏi bàn làm việc.
-- **Tương tác nhanh & Phím tắt toàn cục (`Alt + Space`)**:
-  - **Phím tắt toàn cục hệ thống (`Alt + Space`)**: Đang làm việc ở bất kỳ đâu (lướt web, đọc tài liệu, soạn thảo), chỉ cần bấm `Alt + Space` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi mà không cần chạm vào chuột.
-  - **Tương tác trực tiếp trên popup**: Nhấn nút *"Đến cửa sổ [Alt+Space]"*, hoặc dùng phím tắt `Enter` / `Space` / `F` để chuyển vào ứng dụng, `Esc` / `Q` để đóng popup.
+- **Tương tác nhanh & Phím tắt toàn cục (`Alt + Q`)**:
+  - **Phím tắt toàn cục hệ thống (`Alt + Q`)**: Đang làm việc ở bất kỳ đâu (lướt web, đọc tài liệu, soạn thảo), chỉ cần bấm `Alt + Q` để chuyển ngay đến cửa sổ AI agent đang chờ phản hồi mà không cần chạm vào chuột.
+  - **Tương tác trực tiếp trên popup**: Nhấn nút *"Đến cửa sổ [Alt+Q]"*, hoặc dùng phím tắt `Enter` / `Space` / `F` để chuyển vào ứng dụng, `Esc` / `Q` để đóng popup.
 - **Bộ công cụ CLI `anoti`**: Lệnh ngắn gọn, tiện lợi để focus cửa sổ, cập nhật, kiểm tra trạng thái, bắn thông báo thử nghiệm và gỡ cài đặt ở bất kỳ đâu trên hệ thống.
 
 ---
@@ -51,7 +52,7 @@ Sau khi cài đặt xong, hãy tải lại cửa sổ VS Code / IDE của bạn:
 Sau khi cài đặt, bạn có thể gọi lệnh `anoti` từ bất kỳ thư mục nào trên máy:
 
 ```bash
-# 1. Chuyển ngay đến cửa sổ AI agent đang chờ phản hồi (hoặc dùng phím tắt Alt + Space)
+# 1. Chuyển ngay đến cửa sổ AI agent đang chờ phản hồi (hoặc dùng phím tắt Alt + Q)
 anoti focus
 # hoặc dùng cờ ngắn:
 anoti -f

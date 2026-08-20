@@ -540,6 +540,63 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     return ""
 
 
+def get_current_active_window():
+    """Returns the currently active X11 window ID in decimal format, or empty string."""
+    try:
+        res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
+        wid = res.decode().strip()
+        if wid.isdigit():
+            return wid
+    except Exception:
+        pass
+    return ""
+
+
+def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id=""):
+    """
+    Checks if active_wid corresponds to the target application window that triggered the notification.
+    """
+    if not active_wid or not str(active_wid).strip().isdigit():
+        return False
+    active_wid_str = str(active_wid).strip()
+
+    # 1. Direct match with target_wid
+    if target_wid and str(target_wid).strip().isdigit():
+        if active_wid_str == str(target_wid).strip():
+            return True
+
+    # 2. Match with cached session window
+    if session_id:
+        cached_wid = get_session_window(session_id)
+        if cached_wid and str(cached_wid).strip() == active_wid_str:
+            return True
+
+    # 3. Match PID tree
+    if caller_pid and int(caller_pid) > 0:
+        try:
+            wpid_str = subprocess.check_output(["xdotool", "getwindowpid", active_wid_str], stderr=subprocess.DEVNULL).decode().strip()
+            if wpid_str.isdigit():
+                wpid = int(wpid_str)
+                pid_tree = get_process_ancestors(caller_pid)
+                if wpid in pid_tree:
+                    return True
+        except Exception:
+            pass
+
+    # 4. Match project hint in active window title
+    if project_hint and str(project_hint).strip():
+        try:
+            active_title = find_window_title(active_wid_str)
+            hint = str(project_hint).strip().lower()
+            if hint and hint in active_title:
+                if any(app in active_title for app in ["visual studio code", "code", "terminal", "alacritty", "kitty", "tmux", "bash", "zsh"]) or len(hint) >= 4:
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def get_queue_key(session_id="", window_id="", caller_pid=0, project_hint=""):
     """Generates a stable key for a window/session to track pending notifications."""
     if session_id and str(session_id).strip():
@@ -963,7 +1020,7 @@ def is_boilerplate_message(text, tag_class):
     return False
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key=""):
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
     display_text = extract_summary_from_payload(questions_json, message)
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -1082,8 +1139,13 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         )
 
         windows = []
+        closing = [False]
 
         def handle_focus_and_close():
+            if closing[0]:
+                return
+            closing[0] = True
+
             wid_to_focus = target_window_id
             if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
                 wid_to_focus = find_target_window(
@@ -1109,6 +1171,10 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             GLib.timeout_add(60, Gtk.main_quit)
 
         def handle_close_only():
+            if closing[0]:
+                return
+            closing[0] = True
+
             if queue_key:
                 remove_from_queue(queue_key)
 
@@ -1220,7 +1286,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             btn_box.set_margin_top(4)
 
-            btn_focus = Gtk.Button(label="Đến cửa sổ [Alt+Space]")
+            btn_focus = Gtk.Button(label="Đến cửa sổ [Alt+Q]")
             btn_focus.get_style_context().add_class("focus-btn")
             btn_focus.connect("clicked", lambda b: handle_focus_and_close())
 
@@ -1261,6 +1327,44 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.stick()
             windows.append(win)
 
+        # Auto-dismiss when target window is active/focused by the user
+        if auto_dismiss_delay > 0:
+            active_since = [None]
+
+            def check_target_window_active_timer():
+                if closing[0]:
+                    return False
+
+                nonlocal target_window_id
+                if not target_window_id or not is_valid_toplevel_window(target_window_id):
+                    target_window_id = find_target_window(
+                        window_id_arg="",
+                        caller_pid=caller_pid,
+                        project_hint=project_hint,
+                        session_id=session_id,
+                    )
+
+                active_wid = get_current_active_window()
+                if active_wid and is_target_window_active(
+                    active_wid,
+                    target_wid=target_window_id,
+                    caller_pid=caller_pid,
+                    project_hint=project_hint,
+                    session_id=session_id,
+                ):
+                    now = time.time()
+                    if active_since[0] is None:
+                        active_since[0] = now
+                    elif (now - active_since[0]) >= auto_dismiss_delay:
+                        handle_close_only()
+                        return False
+                else:
+                    active_since[0] = None
+
+                return True
+
+            GLib.timeout_add(250, check_target_window_active_timer)
+
         if timeout > 0:
             GLib.timeout_add_seconds(timeout, handle_close_only)
 
@@ -1287,6 +1391,7 @@ def main():
     parser.add_argument("--capture-session", action="store_true", default=False)
     parser.add_argument("--focus", "-f", action="store_true", default=False, help="Focus the target application window waiting for input.")
     parser.add_argument("--from-queue", action="store_true", default=False, help="Indicates notification was popped from pending queue.")
+    parser.add_argument("--auto-dismiss-delay", type=float, default=1.5, help="Seconds to wait before automatically dismissing notification when target window is active (default: 1.5s, 0 to disable).")
     parser.add_argument("--dedupe-seconds", type=int, default=2)
     parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
     parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
@@ -1411,6 +1516,7 @@ def main():
         project_hint=args.project_hint,
         session_id=args.session_id,
         queue_key=queue_key,
+        auto_dismiss_delay=args.auto_dismiss_delay,
     )
 
 

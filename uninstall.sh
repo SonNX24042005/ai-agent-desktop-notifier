@@ -109,7 +109,7 @@ try:
         bindings.remove(target_path)
         subprocess.run(["gsettings", "set", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings", str(bindings)], check=False)
         subprocess.run(["gsettings", "reset-recursively", f"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{target_path}"], check=False)
-        print("✓ Removed Alt+Space global shortcut and restored default window menu")
+        print("✓ Removed Alt+Q global shortcut")
 except Exception:
     pass
 '

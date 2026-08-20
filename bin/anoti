@@ -83,10 +83,10 @@ def cmd_status():
             ["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/", "binding"],
             stderr=subprocess.DEVNULL
         ).decode().strip()
-        shortcut_ok = "<Alt>space" in out
+        shortcut_ok = "<Alt>q" in out
     except Exception:
         pass
-    print(f"- Global Shortcut:   {'[OK] Alt+Space -> anoti focus' if shortcut_ok else '[-] Chua dang ky phim tat toan cuc'}")
+    print(f"- Global Shortcut:   {'[OK] Alt+Q -> anoti focus' if shortcut_ok else '[-] Chua dang ky phim tat toan cuc'}")
 
     # 3. Claude Code
     claude_settings = USER_HOME / ".claude" / "settings.json"
@@ -324,7 +324,7 @@ def main():
     # If no arguments provided, show status & help
     cmd_status()
     print("\nCac lenh nhanh:")
-    print("   anoti focus        # Focus ngay vao cua so AI agent dang cho phan hoi (Alt+Space)")
+    print("   anoti focus        # Focus ngay vao cua so AI agent dang cho phan hoi (Alt+Q)")
     print("   anoti update       # Cap nhat phien ban moi nhat")
     print("   anoti test         # Ban thong bao thu nghiem")
     print("   anoti status       # Kiem tra trang thai tich hop")
