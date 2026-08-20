@@ -97,9 +97,76 @@ if "invocationNum" in data or event_name == "PreInvocation":
     print("{}")
     sys.exit(0)
 
+def is_genuine_antigravity_completion(payload):
+    """
+    Strictly verifies if Antigravity has genuinely completed its turn and is waiting
+    for the user's next prompt, preventing premature completion notifications during
+    multi-step executions, subagents, errors, or ask_question waits.
+    """
+    # 1. If explicitly not fully idle, the agent is still running / has pending tasks
+    if payload.get("fullyIdle") is False:
+        return False
+
+    # 2. If there is a fatal error, do not notify completion
+    if payload.get("error"):
+        return False
+
+    term_reason = str(payload.get("terminationReason") or "").upper()
+    if term_reason == "ERROR":
+        return False
+
+    evt = payload.get("hook_event_name") or payload.get("event") or ""
+    n_type = payload.get("notification_type") or payload.get("type") or ""
+
+    is_stop_event = (
+        bool(term_reason)
+        or evt in ["Stop", "agent_completed"]
+        or n_type == "agent_completed"
+        or payload.get("fullyIdle") is True
+    )
+    if not is_stop_event:
+        return False
+
+    # 3. Check transcript to ensure the model did not yield for ask_question or a pending tool call
+    transcript_path = payload.get("transcriptPath")
+    if transcript_path:
+        candidate_paths = [
+            transcript_path.replace("transcript_full.jsonl", "transcript.jsonl"),
+            transcript_path,
+        ]
+        for path in candidate_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        f.seek(0, os.SEEK_END)
+                        size = f.tell()
+                        f.seek(max(0, size - 16384), os.SEEK_SET)
+                        chunk = f.read().decode("utf-8", errors="ignore")
+                    lines = [l.strip() for l in chunk.splitlines() if l.strip()]
+                    for line in reversed(lines):
+                        try:
+                            step = json.loads(line)
+                            # Check the most recent planner response
+                            if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
+                                tool_calls = step.get("tool_calls") or []
+                                # If the model called an ask tool, it is waiting for user response, NOT completed
+                                if any("ask" in (tc.get("name") or "").lower() for tc in tool_calls):
+                                    return False
+                                # If tool calls were made in this step, this was an intermediate step
+                                if tool_calls and len(tool_calls) > 0:
+                                    return False
+                                break
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+    return True
+
+
 # 4. Check Question tool vs Completion vs Other tools
 is_question = tool_name in ["ask_question", "AskUserQuestion", "ask_user"] or ("ask" in tool_name.lower())
-is_completion = bool(termination_reason) or event_name in ["Stop", "agent_completed"] or notif_type == "agent_completed" or data.get("fullyIdle") is True
+is_completion = False if is_question else is_genuine_antigravity_completion(data)
 
 # Fast exit if tool call is not a question tool
 if "toolCall" in data and not is_question:
