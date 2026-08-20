@@ -35,8 +35,14 @@ try:
 except Exception:
     data = {}
 
-# 1. Ignore background initialization from agent2agents immediately (0ms)
-if os.environ.get("AGENT2AGENTS_INITIALIZING") == "1" or os.environ.get("A2A_SILENT") == "1":
+# 1. Fast-path: Ignore idle_prompt, agent_needs_input, and background initialization immediately (0ms)
+if (
+    os.environ.get("AGENT2AGENTS_INITIALIZING") == "1"
+    or os.environ.get("A2A_SILENT") == "1"
+    or data.get("notification_type") in ["idle_prompt", "agent_needs_input"]
+    or data.get("hook_event_name") in ["idle_prompt", "agent_needs_input"]
+    or data.get("event") in ["idle_prompt", "agent_needs_input"]
+):
     print('{"decision": "allow"}' if "toolCall" in data else "{}")
     sys.exit(0)
 
@@ -100,8 +106,12 @@ if "invocationNum" in data or event_name == "PreInvocation":
 def is_genuine_antigravity_completion(payload):
     """
     Strictly verifies if Antigravity has genuinely completed its turn and is waiting
-    for the user's next prompt, preventing premature completion notifications during
-    multi-step executions, subagents, errors, or ask_question waits.
+    for the user's next prompt, preventing premature completion notifications during:
+    - Multi-step tool executions
+    - Active background tasks / timers (status == RUNNING)
+    - Interim status messages
+    - Errors / Quota exhaustion
+    - ask_question modal wait states
     """
     # 1. If explicitly not fully idle, the agent is still running / has pending tasks
     if payload.get("fullyIdle") is False:
@@ -127,7 +137,7 @@ def is_genuine_antigravity_completion(payload):
     if not is_stop_event:
         return False
 
-    # 3. Check transcript to ensure the model did not yield for ask_question or a pending tool call
+    # 3. Check transcript for active background tasks, pending questions, or interim status
     transcript_path = payload.get("transcriptPath")
     if transcript_path:
         candidate_paths = [
@@ -140,24 +150,52 @@ def is_genuine_antigravity_completion(payload):
                     with open(path, "rb") as f:
                         f.seek(0, os.SEEK_END)
                         size = f.tell()
-                        f.seek(max(0, size - 16384), os.SEEK_SET)
+                        # Read last 64KB
+                        f.seek(max(0, size - 65536), os.SEEK_SET)
                         chunk = f.read().decode("utf-8", errors="ignore")
+                    
                     lines = [l.strip() for l in chunk.splitlines() if l.strip()]
-                    for line in reversed(lines):
+                    running_tasks = set()
+                    completed_tasks = set()
+                    steps = []
+
+                    for line in lines:
                         try:
                             step = json.loads(line)
-                            # Check the most recent planner response
-                            if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
-                                tool_calls = step.get("tool_calls") or []
-                                # If the model called an ask tool, it is waiting for user response, NOT completed
-                                if any("ask" in (tc.get("name") or "").lower() for tc in tool_calls):
-                                    return False
-                                # If tool calls were made in this step, this was an intermediate step
-                                if tool_calls and len(tool_calls) > 0:
-                                    return False
-                                break
+                            steps.append(step)
+
+                            # Track background tasks launched
+                            if step.get("status") == "RUNNING":
+                                content = step.get("content", "")
+                                if "task id:" in content:
+                                    tid = content.split("task id:")[1].split()[0].strip()
+                                    running_tasks.add(tid)
+
+                            # Track background tasks finished
+                            if step.get("source") == "SYSTEM" and step.get("type") == "SYSTEM_MESSAGE":
+                                content = step.get("content", "")
+                                if "Task id \"" in content and "finished with result" in content:
+                                    tid = content.split("Task id \"")[1].split("\"")[0].strip()
+                                    completed_tasks.add(tid)
                         except Exception:
                             continue
+
+                    # If any background task is still running, the agent is NOT finished
+                    active_tasks = running_tasks - completed_tasks
+                    if len(active_tasks) > 0:
+                        return False
+
+                    # Check recent model steps in reverse
+                    for step in reversed(steps):
+                        if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
+                            tool_calls = step.get("tool_calls") or []
+                            # If the model called an ask tool, it is waiting for user response, NOT completed
+                            if any("ask" in (tc.get("name") or "").lower() for tc in tool_calls):
+                                return False
+                            # If tool calls were made in this step, this was an intermediate step
+                            if tool_calls and len(tool_calls) > 0:
+                                return False
+                            break
                 except Exception:
                     pass
 

@@ -52,6 +52,8 @@ def save_session_window(session_id, window_id, project_hint="", pid=0):
     """Caches target window ID for a session ID to enable 100% precision focus."""
     if not session_id or not window_id:
         return
+    if not is_developer_window(window_id):
+        return
     sessions = {}
     if os.path.exists(SESSION_CACHE_FILE):
         try:
@@ -83,10 +85,13 @@ def get_session_window(session_id):
         with open(SESSION_CACHE_FILE, "r") as f:
             sessions = json.load(f)
         s_info = sessions.get(str(session_id))
+        wid = ""
         if s_info and isinstance(s_info, dict):
-            return s_info.get("window_id", "")
+            wid = s_info.get("window_id", "")
         elif isinstance(s_info, str):
-            return s_info
+            wid = s_info
+        if wid and is_developer_window(wid):
+            return wid
     except Exception:
         pass
     return ""
@@ -449,13 +454,75 @@ def get_process_ancestors(pid):
     return ancestors
 
 
+def get_window_wm_class(wid):
+    """Returns the WM_CLASS tuple (instance, class_name) in lowercase."""
+    if not wid or not str(wid).strip().isdigit():
+        return ("", "")
+    try:
+        out = subprocess.check_output(["xprop", "-id", str(wid).strip(), "WM_CLASS"], stderr=subprocess.DEVNULL).decode()
+        matches = re.findall(r'"([^"]*)"', out)
+        if len(matches) >= 2:
+            return (matches[0].lower(), matches[1].lower())
+        elif len(matches) == 1:
+            return (matches[0].lower(), matches[0].lower())
+    except Exception:
+        pass
+    return ("", "")
+
+
+DEVELOPER_CLASSES = {
+    # Terminals
+    "gnome-terminal", "gnome-terminal-server", "tilix", "alacritty", "kitty",
+    "wezterm", "xfce4-terminal", "konsole", "terminator", "xterm", "uxterm",
+    "urxvt", "rxvt", "foot", "contour", "ptyxis", "hyper", "tabby", "rio",
+    # IDEs & Editors
+    "code", "vscodium", "cursor", "windsurf", "antigravity", "zed",
+    "pycharm", "pycharm-community", "idea", "idea-ce", "clion", "webstorm",
+    "goland", "phpstorm", "rider", "rubymine", "datagrip", "fleet",
+    "sublime_text", "subl", "gedit", "kate", "emacs", "neovim", "gvim",
+}
+
+EXCLUDED_CLASSES = {
+    # File managers
+    "nemo", "nautilus", "dolphin", "thunar", "pcmanfm", "caja", "krusader", "doublecmd",
+    # System / Window frames / Desktop
+    "mutter-x11-frames", "desktop_window", "desktop", "gala-other", "cinnamon",
+    # PDF & Document viewers
+    "okular", "evince", "atril", "xreader", "zathura", "acroread", "libreoffice",
+    # Media & Browsers & Chat
+    "spotify", "vlc", "mpv", "discord", "slack", "telegram-desktop",
+}
+
+
+def is_developer_window(wid):
+    """
+    Checks whether a window belongs to a known developer host (IDE, code editor, or terminal).
+    Guarantees that file managers (Nemo/Nautilus), PDF viewers (Okular), and system window frames
+    are never targeted or cached.
+    """
+    if not is_valid_toplevel_window(wid):
+        return False
+    inst, cls = get_window_wm_class(wid)
+    if not inst and not cls:
+        return False
+    if any(ex in inst or ex in cls for ex in EXCLUDED_CLASSES):
+        return False
+    if any(dev in inst or dev in cls for dev in DEVELOPER_CLASSES):
+        return True
+    # If title contains strong terminal / IDE indicators
+    title = find_window_title(wid)
+    if any(app in title for app in ["visual studio code", "code", "terminal", "alacritty", "kitty", "tmux", "bash", "zsh"]):
+        return True
+    return False
+
+
 def get_all_managed_windows():
     results = []
     try:
         out = subprocess.check_output(["xdotool", "search", "--onlyvisible", ""], stderr=subprocess.DEVNULL).decode()
         for wid in out.splitlines():
             wid = wid.strip()
-            if not wid or not is_valid_toplevel_window(wid):
+            if not wid or not is_valid_toplevel_window(wid) or not is_developer_window(wid):
                 continue
             try:
                 name = subprocess.check_output(["xdotool", "getwindowname", wid], stderr=subprocess.DEVNULL).decode().strip()
@@ -479,7 +546,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     # 0. Tier 0: Check session cache if session_id is provided
     if session_id:
         cached_wid = get_session_window(session_id)
-        if cached_wid and is_valid_toplevel_window(cached_wid):
+        if cached_wid and is_developer_window(cached_wid):
             return cached_wid
 
     project_hint = (project_hint or "").strip().lower()
@@ -488,7 +555,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     # 1. Tier 1: Match by PID tree + project_hint (Exact process owner)
     if caller_pid:
         pid_tree = get_process_ancestors(caller_pid)
-        tree_windows = [(wid, name) for wid, name, wpid in managed_windows if wpid in pid_tree]
+        tree_windows = [(wid, name) for wid, name, wpid in managed_windows if wpid in pid_tree and is_developer_window(wid)]
         if tree_windows:
             if project_hint:
                 for wid, name in tree_windows:
@@ -513,7 +580,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     # 3. Tier 3: Match window from TTY / pts if provided
     if caller_tty:
         tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
-        if tty_window and is_valid_toplevel_window(tty_window):
+        if tty_window and is_developer_window(tty_window):
             if session_id:
                 save_session_window(session_id, tty_window, project_hint, caller_pid)
             return tty_window
@@ -521,7 +588,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     # 4. Tier 4: Explicit window_id_arg if valid
     if window_id_arg and str(window_id_arg).strip().isdigit():
         wid = str(window_id_arg).strip()
-        if is_valid_toplevel_window(wid):
+        if is_developer_window(wid):
             if session_id:
                 save_session_window(session_id, wid, project_hint, caller_pid)
             return wid
@@ -530,7 +597,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     try:
         res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
         active_wid = res.decode().strip()
-        if active_wid and is_valid_toplevel_window(active_wid):
+        if active_wid and is_developer_window(active_wid):
             if session_id:
                 save_session_window(session_id, active_wid, project_hint, caller_pid)
             return active_wid
@@ -583,13 +650,13 @@ def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hin
         except Exception:
             pass
 
-    # 4. Match project hint in active window title
+    # 4. Match project hint in active window title (developer windows only)
     if project_hint and str(project_hint).strip():
         try:
-            active_title = find_window_title(active_wid_str)
-            hint = str(project_hint).strip().lower()
-            if hint and hint in active_title:
-                if any(app in active_title for app in ["visual studio code", "code", "terminal", "alacritty", "kitty", "tmux", "bash", "zsh"]) or len(hint) >= 4:
+            if is_developer_window(active_wid_str):
+                active_title = find_window_title(active_wid_str)
+                hint = str(project_hint).strip().lower()
+                if hint and hint in active_title:
                     return True
         except Exception:
             pass
