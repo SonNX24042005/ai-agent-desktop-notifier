@@ -6,6 +6,7 @@ Multi-Monitor Desktop Notifier & Window Focuser for AI Coding Agents
 Renders lightweight dark-themed desktop notification banners across connected monitors.
 When clicked (or when clicking "Đến cửa sổ ứng dụng"), it automatically focuses and
 brings to front the exact application window (VS Code or Terminal) that triggered the notification.
+Cross-platform support for Linux (X11 / GNOME / GTK3) and Windows 10/11 (Win32 / Tkinter / Toast).
 """
 
 import argparse
@@ -17,37 +18,175 @@ import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-PID_FILE = "/tmp/ai_agent_notifier.pid"
-SESSION_CACHE_FILE = "/tmp/ai_agent_notifier_sessions.json"
-DEDUPE_CACHE_FILE = "/tmp/ai_agent_notifier_dedupe.json"
-QUEUE_CACHE_FILE = "/tmp/ai_agent_notifier_queue.json"
+IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
+
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+    TEMP_DIR = os.environ.get("TEMP") or os.environ.get("TMP") or os.path.expanduser("~\\AppData\\Local\\Temp")
+    PYTHON3 = sys.executable or "python"
+else:
+    TEMP_DIR = "/tmp"
+    PYTHON3 = sys.executable or "/usr/bin/python3"
+
+PID_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier.pid")
+SESSION_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_sessions.json")
+DEDUPE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_dedupe.json")
+QUEUE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_queue.json")
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
 
-# Ensure DISPLAY and XAUTHORITY are available in background hook processes
-if not os.environ.get("DISPLAY"):
-    for disp in [":1", ":0"]:
-        if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
-            os.environ["DISPLAY"] = disp
-            break
-    else:
-        os.environ["DISPLAY"] = ":1"
+# Ensure DISPLAY and XAUTHORITY are available in background hook processes on Linux
+if not IS_WINDOWS:
+    if not os.environ.get("DISPLAY"):
+        for disp in [":1", ":0"]:
+            if os.path.exists(f"/tmp/.X11-unix/X{disp.lstrip(':')}"):
+                os.environ["DISPLAY"] = disp
+                break
+        else:
+            os.environ["DISPLAY"] = ":1"
 
-if not os.environ.get("XDG_RUNTIME_DIR"):
-    os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        try:
+            os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+        except AttributeError:
+            pass
 
-if not os.environ.get("XAUTHORITY"):
-    uid = os.getuid()
-    for xauth_path in [
-        f"/run/user/{uid}/gdm/Xauthority",
-        os.path.expanduser("~/.Xauthority"),
-        f"/run/user/{uid}/.Xauthority",
-    ]:
-        if os.path.exists(xauth_path):
-            os.environ["XAUTHORITY"] = xauth_path
-            break
+    if not os.environ.get("XAUTHORITY"):
+        try:
+            uid = os.getuid()
+            for xauth_path in [
+                f"/run/user/{uid}/gdm/Xauthority",
+                os.path.expanduser("~/.Xauthority"),
+                f"/run/user/{uid}/.Xauthority",
+            ]:
+                if os.path.exists(xauth_path):
+                    os.environ["XAUTHORITY"] = xauth_path
+                    break
+        except AttributeError:
+            pass
 
 
+# ---------------------------------------------------------------------------
+# Windows-specific Win32 Structures and Helpers
+# ---------------------------------------------------------------------------
+if IS_WINDOWS:
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", wintypes.LONG),
+            ("top", wintypes.LONG),
+            ("right", wintypes.LONG),
+            ("bottom", wintypes.LONG),
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    def get_windows_process_tree():
+        """Returns a dict mapping {pid: (parent_pid, exe_name)} via Toolhelp snapshot."""
+        tree = {}
+        try:
+            hSnapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+            if hSnapshot == -1 or hSnapshot == 0xFFFFFFFF:
+                return tree
+            try:
+                pe = PROCESSENTRY32()
+                pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+                if ctypes.windll.kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe)):
+                    while True:
+                        tree[pe.th32ProcessID] = (pe.th32ParentProcessID, pe.szExeFile)
+                        if not ctypes.windll.kernel32.Process32NextW(hSnapshot, ctypes.byref(pe)):
+                            break
+            finally:
+                ctypes.windll.kernel32.CloseHandle(hSnapshot)
+        except Exception:
+            pass
+        return tree
+
+    def get_windows_monitors():
+        """Enumerates connected display coordinates on Windows."""
+        monitors = []
+        try:
+            def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(MONITORINFO)
+                if ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(mi)):
+                    rc = mi.rcMonitor
+                    monitors.append({
+                        "x": int(rc.left),
+                        "y": int(rc.top),
+                        "width": int(rc.right - rc.left),
+                        "height": int(rc.bottom - rc.top),
+                        "is_primary": bool(mi.dwFlags & 1),
+                    })
+                return True
+
+            MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(RECT), wintypes.LPARAM)
+            ctypes.windll.user32.EnumDisplayMonitors(None, None, MonitorEnumProc(monitor_enum_proc), 0)
+        except Exception:
+            pass
+        return monitors
+
+
+# ---------------------------------------------------------------------------
+# Developer Window Identification Sets
+# ---------------------------------------------------------------------------
+DEVELOPER_CLASSES = {
+    # Terminals
+    "gnome-terminal", "gnome-terminal-server", "tilix", "alacritty", "kitty",
+    "wezterm", "xfce4-terminal", "konsole", "terminator", "xterm", "uxterm",
+    "urxvt", "rxvt", "foot", "contour", "ptyxis", "hyper", "tabby", "rio",
+    "cascadia_hosting_window_class", "consolewindowclass", "mintty",
+    # IDEs & Editors
+    "code", "vscodium", "cursor", "windsurf", "antigravity", "zed",
+    "pycharm", "pycharm-community", "idea", "idea-ce", "clion", "webstorm",
+    "goland", "phpstorm", "rider", "rubymine", "datagrip", "fleet",
+    "sublime_text", "subl", "gedit", "kate", "emacs", "neovim", "gvim",
+    "chrome_widgetwin_1", "sunawtframe",
+}
+
+EXCLUDED_CLASSES = {
+    # File managers
+    "nemo", "nautilus", "dolphin", "thunar", "pcmanfm", "caja", "krusader", "doublecmd", "cabinetwclass",
+    # System / Window frames / Desktop
+    "mutter-x11-frames", "desktop_window", "desktop", "gala-other", "cinnamon", "progman", "workerw", "shell_traywnd",
+    # PDF & Document viewers
+    "okular", "evince", "atril", "xreader", "zathura", "acroread", "libreoffice",
+    # Media & Browsers & Chat
+    "spotify", "vlc", "mpv", "discord", "slack", "telegram-desktop",
+}
+
+WIN_DEVELOPER_EXES = [
+    "code.exe", "code - insiders.exe", "cursor.exe", "windsurf.exe", "windowsterminal.exe",
+    "cmd.exe", "powershell.exe", "pwsh.exe", "alacritty.exe", "wezterm-gui.exe",
+    "idea64.exe", "pycharm64.exe", "clion64.exe", "webstorm64.exe", "rider64.exe",
+    "goland64.exe", "mintty.exe", "conemu64.exe", "conemu.exe", "antigravity.exe",
+]
+
+
+# ---------------------------------------------------------------------------
+# Session Cache & Queue Management
+# ---------------------------------------------------------------------------
 def save_session_window(session_id, window_id, project_hint="", pid=0):
     """Caches target window ID for a session ID to enable 100% precision focus."""
     if not session_id or not window_id:
@@ -126,6 +265,112 @@ def is_duplicate_notification(app_name, title, message, dedupe_seconds=2):
     return False
 
 
+def load_notification_queue():
+    """Loads all pending notifications currently waiting in queue."""
+    if not os.path.exists(QUEUE_CACHE_FILE):
+        return {}
+    try:
+        with open(QUEUE_CACHE_FILE, "r") as f:
+            queue = json.load(f)
+        now = time.time()
+        # Discard expired notifications older than 4 hours
+        active_queue = {k: v for k, v in queue.items() if isinstance(v, dict) and now - v.get("created_at", 0) < 14400}
+        return active_queue
+    except Exception:
+        return {}
+
+
+def save_to_queue(key, notif_item):
+    """Saves or updates a pending notification item in the persistent queue."""
+    if not key or not notif_item:
+        return
+    queue = load_notification_queue()
+    queue[key] = notif_item
+    try:
+        with open(QUEUE_CACHE_FILE, "w") as f:
+            json.dump(queue, f)
+    except Exception:
+        pass
+
+
+def remove_from_queue(key):
+    """Removes a resolved notification from the persistent queue."""
+    if not key:
+        return
+    queue = load_notification_queue()
+    if key in queue:
+        del queue[key]
+        try:
+            with open(QUEUE_CACHE_FILE, "w") as f:
+                json.dump(queue, f)
+        except Exception:
+            pass
+
+
+def pop_next_notification_async(exclude_key=""):
+    """Pops and launches the next pending notification from the queue if any exist."""
+    queue = load_notification_queue()
+    if exclude_key and exclude_key in queue:
+        del queue[exclude_key]
+
+    if not queue:
+        return
+
+    pending = []
+    for k, v in queue.items():
+        if isinstance(v, dict):
+            pending.append((v.get("created_at", 0), k, v))
+    pending.sort(key=lambda x: x[0])
+
+    if not pending:
+        return
+
+    _, next_key, item = pending[0]
+    app_name = item.get("app_name", "AI Agent")
+    title = item.get("title", "Thông báo")
+    message = item.get("message", "")
+    questions_json = item.get("questions_json", "")
+    urgency = item.get("urgency", "normal")
+    sound = item.get("sound", "")
+    target_wid = item.get("target_window_id", "")
+    caller_pid = item.get("caller_pid", 0)
+    project_hint = item.get("project_hint", "")
+    session_id = item.get("session_id", "")
+    timeout = item.get("timeout", 0)
+
+    cmd = [
+        PYTHON3,
+        __file__,
+        f"--app-name={app_name}",
+        f"--title={title}",
+        f"--message={message}",
+        f"--urgency={urgency}",
+        f"--window-id={target_wid}",
+        f"--caller-pid={caller_pid}",
+        f"--project-hint={project_hint}",
+        f"--session-id={session_id}",
+        f"--timeout={timeout}",
+        "--from-queue",
+    ]
+    if sound:
+        cmd.append(f"--sound={sound}")
+    if questions_json:
+        cmd.append(f"--questions-json={questions_json}")
+
+    try:
+        creationflags = 0x08000000 if IS_WINDOWS else 0
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            creationflags=creationflags,
+        )
+    except Exception:
+        pass
+
+
 def dispatch_webhooks_async(app_name, title, message):
     """Dispatches webhooks asynchronously to external channels if configured."""
     if not os.path.exists(CONFIG_FILE):
@@ -182,10 +427,13 @@ def kill_previous_instance():
                 old_pid = int(f.read().strip())
             if old_pid != os.getpid() and old_pid > 1:
                 try:
-                    with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
-                        cmdline = cf.read().decode(errors="ignore")
-                    if "multi-desktop-notify" in cmdline:
+                    if IS_WINDOWS:
                         os.kill(old_pid, signal.SIGTERM)
+                    else:
+                        with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
+                            cmdline = cf.read().decode(errors="ignore")
+                        if "multi-desktop-notify" in cmdline:
+                            os.kill(old_pid, signal.SIGTERM)
                 except OSError:
                     pass
         except Exception:
@@ -193,17 +441,6 @@ def kill_previous_instance():
     try:
         with open(PID_FILE, "w") as f:
             f.write(str(os.getpid()))
-    except Exception:
-        pass
-
-
-def send_fallback_notify(app_name, title, message, urgency="normal", timeout=0):
-    """Fallback standard desktop notification using notify-send if GUI popup fails."""
-    try:
-        cmd = ["notify-send", f"[{app_name}] {title}", message, "-u", urgency]
-        if timeout > 0:
-            cmd.extend(["-t", str(timeout * 1000)])
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     except Exception:
         pass
 
@@ -217,7 +454,25 @@ def clean_text(value, limit=300):
     return text
 
 
-def play_sound_async(sound_path):
+def play_sound_async(sound_path=""):
+    """Plays notification sound asynchronously on Windows or Linux."""
+    if IS_WINDOWS:
+        try:
+            import winsound
+            import threading
+            def play_win():
+                try:
+                    if sound_path and os.path.isfile(sound_path) and sound_path.lower().endswith(".wav"):
+                        winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    else:
+                        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                except Exception:
+                    pass
+            threading.Thread(target=play_win, daemon=True).start()
+            return
+        except Exception:
+            pass
+
     if not sound_path or not os.path.isfile(sound_path):
         return
 
@@ -236,213 +491,132 @@ def play_sound_async(sound_path):
                 pass
 
 
-def is_valid_toplevel_window(wid):
-    """
-    Checks if WID is a valid managed toplevel window (has _NET_WM_STATE property).
-    Filters out internal non-toplevel container windows.
-    """
-    if not wid or not str(wid).strip().isdigit():
-        return False
+def send_windows_toast_async(app_name, title, message):
+    """Sends a native Windows 10/11 Toast notification via PowerShell in the background."""
+    if not IS_WINDOWS:
+        return
+
+    import threading
+    def worker():
+        try:
+            ps_title = title.replace("`", "``").replace('"', '`"').replace("$", "`$")
+            ps_msg = message.replace("`", "``").replace('"', '`"').replace("$", "`$")
+            ps_app = app_name.replace("`", "``").replace('"', '`"').replace("$", "`$")
+
+            ps_code = f"""
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$textNodes = $template.GetElementsByTagName("text")
+$textNodes.Item(0).AppendChild($template.CreateTextNode("{ps_app}: {ps_title}")) > $null
+$textNodes.Item(1).AppendChild($template.CreateTextNode("{ps_msg}")) > $null
+$toast = [Windows.UI.Notifications.ToastNotification]::new($template)
+$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("AI Agent Notifier")
+$notifier.Show($toast)
+"""
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = 0x08000000  # CREATE_NO_WINDOW
+
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_code],
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=5
+            )
+        except Exception:
+            pass
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+
+def send_fallback_notify(app_name, title, message, urgency="normal", timeout=0):
+    """Fallback standard desktop notification using notify-send (Linux) or Toast (Windows)."""
+    if IS_WINDOWS:
+        send_windows_toast_async(app_name, title, message)
+        return
     try:
-        out = subprocess.check_output(["xprop", "-id", str(wid).strip(), "_NET_WM_STATE"], stderr=subprocess.DEVNULL).decode()
+        cmd = ["notify-send", f"[{app_name}] {title}", message, "-u", urgency]
+        if timeout > 0:
+            cmd.extend(["-t", str(timeout * 1000)])
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Cross-Platform Window Management & Inspection
+# ---------------------------------------------------------------------------
+def is_valid_toplevel_window(wid):
+    """Checks if WID is a valid managed top-level window."""
+    if not wid:
+        return False
+    wid_str = str(wid).strip()
+    if not wid_str.isdigit():
+        return False
+
+    if IS_WINDOWS:
+        try:
+            hwnd = int(wid_str)
+            return bool(ctypes.windll.user32.IsWindow(hwnd) and ctypes.windll.user32.IsWindowVisible(hwnd))
+        except Exception:
+            return False
+
+    try:
+        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_STATE"], stderr=subprocess.DEVNULL).decode()
         return "_NET_WM_STATE" in out and "not found" not in out
     except Exception:
         return False
 
 
 def find_window_title(wid):
-    try:
-        return subprocess.check_output(["xdotool", "getwindowname", str(wid)], stderr=subprocess.DEVNULL).decode().strip().lower()
-    except Exception:
+    """Returns the lowercased window title for a window ID."""
+    if not wid:
+        return ""
+    wid_str = str(wid).strip()
+    if not wid_str.isdigit():
         return ""
 
-
-def write_terminal_control(tty_path, sequence):
-    """Write a terminal control sequence only to a real pts device."""
-    if not tty_path or not str(tty_path).startswith("/dev/pts/"):
-        return False
-
-    try:
-        tty_stat = os.stat(tty_path)
-        if not stat.S_ISCHR(tty_stat.st_mode):
-            return False
-        fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
+    if IS_WINDOWS:
         try:
-            os.write(fd, sequence.encode("utf-8"))
-        finally:
-            os.close(fd)
-        return True
-    except Exception:
-        return False
-
-
-def find_marker_window(marker):
-    try:
-        result = subprocess.check_output(
-            ["xdotool", "search", "--name", marker],
-            stderr=subprocess.DEVNULL,
-        )
-        for wid in result.decode().splitlines():
-            wid = wid.strip()
-            if is_valid_toplevel_window(wid):
-                return wid
-    except Exception:
-        pass
-    return ""
-
-
-def gnome_terminal_window_states():
-    """Return (D-Bus window path, active tab index) pairs for GNOME Terminal."""
-    try:
-        output = subprocess.check_output(
-            [
-                "gdbus",
-                "introspect",
-                "--session",
-                "--dest",
-                "org.gnome.Terminal",
-                "--object-path",
-                "/org/gnome/Terminal/window",
-            ],
-            stderr=subprocess.DEVNULL,
-            timeout=0.5,
-        ).decode()
-    except Exception:
-        return []
-
-    paths = []
-    for line in output.splitlines():
-        match = re.match(r"\s*node ([0-9]+) \{", line)
-        if match:
-            paths.append(f"/org/gnome/Terminal/window/{match.group(1)}")
-
-    states = []
-    for path in paths:
-        try:
-            describe = subprocess.check_output(
-                [
-                    "gdbus",
-                    "call",
-                    "--session",
-                    "--dest",
-                    "org.gnome.Terminal",
-                    "--object-path",
-                    path,
-                    "--method",
-                    "org.gtk.Actions.Describe",
-                    "active-tab",
-                ],
-                stderr=subprocess.DEVNULL,
-                timeout=0.5,
-            ).decode()
-            match = re.search(r"\(\((true|false), signature 'i', \[<([0-9]+)>\]", describe)
-            if match and match.group(1) == "true":
-                states.append((path, int(match.group(2))))
+            hwnd = int(wid_str)
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value.strip().lower()
         except Exception:
-            continue
-    return states
+            return ""
 
-
-def activate_gnome_terminal_tab(window_path, tab_index):
     try:
-        subprocess.run(
-            [
-                "gdbus",
-                "call",
-                "--session",
-                "--dest",
-                "org.gnome.Terminal",
-                "--object-path",
-                window_path,
-                "--method",
-                "org.gtk.Actions.Activate",
-                "active-tab",
-                f"[<{tab_index}>]",
-                "{}",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=0.5,
-            check=False,
-        )
+        return subprocess.check_output(["xdotool", "getwindowname", wid_str], stderr=subprocess.DEVNULL).decode().strip().lower()
     except Exception:
-        pass
-
-
-def find_gnome_terminal_tab_window(marker):
-    """Select the GNOME Terminal tab carrying marker and return its X11 window."""
-    states = gnome_terminal_window_states()
-    if not states:
         return ""
-
-    target_path = ""
-    target_window = ""
-    try:
-        for window_path, original_index in states:
-            # GNOME's built-in tab shortcuts support at least ten tabs. Trying
-            # a bounded range also works for windows with more tabs: invalid
-            # indices are harmless no-ops.
-            for tab_index in range(10):
-                activate_gnome_terminal_tab(window_path, tab_index)
-                time.sleep(0.06)
-                target_window = find_marker_window(marker)
-                if target_window:
-                    target_path = window_path
-                    return target_window
-    finally:
-        # Keep the source tab selected when found; restore every tab touched
-        # during the scan so unrelated terminal windows are not changed.
-        for window_path, original_index in states:
-            if window_path != target_path:
-                activate_gnome_terminal_tab(window_path, original_index)
-
-    return ""
-
-
-def find_window_by_tty(tty_path, terminal_screen=""):
-    """
-    Resolves a GNOME Terminal window from the agent's controlling pts.
-
-    GNOME Terminal puts all tabs/windows under one server PID, so
-    ``xdotool search --pid`` cannot distinguish them. VTE supports a title
-    stack; use a unique temporary title to identify the X11 window, then pop
-    the original title back immediately.
-    """
-    if not tty_path or not str(tty_path).startswith("/dev/pts/"):
-        return ""
-
-    marker = f"AI_NOTIFY_{os.getpid()}_{time.monotonic_ns()}"
-    pushed_title = write_terminal_control(tty_path, f"\x1b[22;0t\x1b]0;{marker}\x07")
-    if not pushed_title:
-        return ""
-
-    try:
-        deadline = time.monotonic() + 0.75
-        while time.monotonic() < deadline:
-            marker_window = find_marker_window(marker)
-            if marker_window:
-                return marker_window
-            time.sleep(0.05)
-
-        # A marker in a hidden tab is not reflected in the parent window title.
-        # When the hook inherited GNOME_TERMINAL_SCREEN, briefly select tabs via
-        # the GNOME Terminal action API to locate that hidden tab as well.
-        if terminal_screen.startswith("/org/gnome/Terminal/screen/"):
-            marker_window = find_gnome_terminal_tab_window(marker)
-            if marker_window:
-                return marker_window
-    finally:
-        # Restore the title saved by VTE's title stack. This keeps the lookup
-        # invisible to the user even when the terminal is not focused.
-        write_terminal_control(tty_path, "\x1b[23;0t")
-
-    return ""
 
 
 def get_process_ancestors(pid):
+    """Traverses process tree upwards and returns set of ancestor process IDs."""
     ancestors = set()
     curr = int(pid or 0)
+    if curr <= 0:
+        return ancestors
     visited = set()
+
+    if IS_WINDOWS:
+        tree = get_windows_process_tree()
+        while curr in tree and curr not in visited and curr > 0:
+            visited.add(curr)
+            ancestors.add(curr)
+            ppid, _ = tree[curr]
+            if ppid == curr or ppid <= 0:
+                break
+            curr = ppid
+        return ancestors
+
     while curr > 1 and curr not in visited:
         visited.add(curr)
         ancestors.add(curr)
@@ -455,9 +629,20 @@ def get_process_ancestors(pid):
 
 
 def get_window_wm_class(wid):
-    """Returns the WM_CLASS tuple (instance, class_name) in lowercase."""
+    """Returns the window class tuple (instance, class_name) in lowercase."""
     if not wid or not str(wid).strip().isdigit():
         return ("", "")
+
+    if IS_WINDOWS:
+        try:
+            hwnd = int(str(wid).strip())
+            class_buf = ctypes.create_unicode_buffer(256)
+            ctypes.windll.user32.GetClassNameW(hwnd, class_buf, 256)
+            cls_name = class_buf.value.strip().lower()
+            return (cls_name, cls_name)
+        except Exception:
+            return ("", "")
+
     try:
         out = subprocess.check_output(["xprop", "-id", str(wid).strip(), "WM_CLASS"], stderr=subprocess.DEVNULL).decode()
         matches = re.findall(r'"([^"]*)"', out)
@@ -470,54 +655,83 @@ def get_window_wm_class(wid):
     return ("", "")
 
 
-DEVELOPER_CLASSES = {
-    # Terminals
-    "gnome-terminal", "gnome-terminal-server", "tilix", "alacritty", "kitty",
-    "wezterm", "xfce4-terminal", "konsole", "terminator", "xterm", "uxterm",
-    "urxvt", "rxvt", "foot", "contour", "ptyxis", "hyper", "tabby", "rio",
-    # IDEs & Editors
-    "code", "vscodium", "cursor", "windsurf", "antigravity", "zed",
-    "pycharm", "pycharm-community", "idea", "idea-ce", "clion", "webstorm",
-    "goland", "phpstorm", "rider", "rubymine", "datagrip", "fleet",
-    "sublime_text", "subl", "gedit", "kate", "emacs", "neovim", "gvim",
-}
-
-EXCLUDED_CLASSES = {
-    # File managers
-    "nemo", "nautilus", "dolphin", "thunar", "pcmanfm", "caja", "krusader", "doublecmd",
-    # System / Window frames / Desktop
-    "mutter-x11-frames", "desktop_window", "desktop", "gala-other", "cinnamon",
-    # PDF & Document viewers
-    "okular", "evince", "atril", "xreader", "zathura", "acroread", "libreoffice",
-    # Media & Browsers & Chat
-    "spotify", "vlc", "mpv", "discord", "slack", "telegram-desktop",
-}
-
-
 def is_developer_window(wid):
-    """
-    Checks whether a window belongs to a known developer host (IDE, code editor, or terminal).
-    Guarantees that file managers (Nemo/Nautilus), PDF viewers (Okular), and system window frames
-    are never targeted or cached.
-    """
+    """Checks whether a window belongs to a known developer host (IDE, editor, or terminal)."""
     if not is_valid_toplevel_window(wid):
         return False
+
     inst, cls = get_window_wm_class(wid)
-    if not inst and not cls:
-        return False
-    if any(ex in inst or ex in cls for ex in EXCLUDED_CLASSES):
-        return False
-    if any(dev in inst or dev in cls for dev in DEVELOPER_CLASSES):
-        return True
-    # If title contains strong terminal / IDE indicators
+    if inst or cls:
+        if any(ex in inst or ex in cls for ex in EXCLUDED_CLASSES):
+            return False
+        if any(dev in inst or dev in cls for dev in DEVELOPER_CLASSES):
+            return True
+
     title = find_window_title(wid)
-    if any(app in title for app in ["visual studio code", "code", "terminal", "alacritty", "kitty", "tmux", "bash", "zsh"]):
+    if any(app in title for app in ["visual studio code", "code", "terminal", "powershell", "alacritty", "kitty", "tmux", "bash", "zsh", "cursor", "windsurf"]):
         return True
+
+    if IS_WINDOWS:
+        try:
+            hwnd = int(str(wid).strip())
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            tree = get_windows_process_tree()
+            exe = tree.get(pid.value, (0, ""))[1].lower()
+            if any(dev_exe in exe for dev_exe in WIN_DEVELOPER_EXES):
+                return True
+        except Exception:
+            pass
+
     return False
 
 
 def get_all_managed_windows():
+    """Enumerates all top-level developer application windows."""
     results = []
+    if IS_WINDOWS:
+        try:
+            tree = get_windows_process_tree()
+            def enum_proc(hwnd, lParam):
+                if not ctypes.windll.user32.IsWindowVisible(hwnd):
+                    return True
+                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                if length == 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value.strip()
+                if not title:
+                    return True
+
+                pid = wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                wpid = pid.value
+
+                class_buf = ctypes.create_unicode_buffer(256)
+                ctypes.windll.user32.GetClassNameW(hwnd, class_buf, 256)
+                cls_name = class_buf.value.strip().lower()
+
+                exe_name = tree.get(wpid, (0, ""))[1].lower()
+
+                is_dev = False
+                if any(dev_exe in exe_name for dev_exe in WIN_DEVELOPER_EXES):
+                    is_dev = True
+                elif any(dev_cls in cls_name for dev_cls in DEVELOPER_CLASSES):
+                    is_dev = True
+                elif any(app in title.lower() for app in ["visual studio code", "code", "terminal", "powershell", "alacritty", "cursor"]):
+                    is_dev = True
+
+                if is_dev:
+                    results.append((str(hwnd), title, wpid))
+                return True
+
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            ctypes.windll.user32.EnumWindows(EnumWindowsProc(enum_proc), 0)
+        except Exception:
+            pass
+        return results
+
     try:
         out = subprocess.check_output(["xdotool", "search", "--onlyvisible", ""], stderr=subprocess.DEVNULL).decode()
         for wid in out.splitlines():
@@ -540,7 +754,7 @@ def get_all_managed_windows():
 
 def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen="", session_id=""):
     """
-    Finds the exact X11 window ID for the application (VS Code, GNOME Terminal, Alacritty, Kitty)
+    Finds the exact window ID for the application (VS Code or Terminal)
     that triggered the notification with 100% precision.
     """
     # 0. Tier 0: Check session cache if session_id is provided
@@ -552,7 +766,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     project_hint = (project_hint or "").strip().lower()
     managed_windows = get_all_managed_windows()
 
-    # 1. Tier 1: Match by PID tree + project_hint (Exact process owner)
+    # 1. Tier 1: Match by PID tree + project_hint
     if caller_pid:
         pid_tree = get_process_ancestors(caller_pid)
         tree_windows = [(wid, name) for wid, name, wpid in managed_windows if wpid in pid_tree and is_developer_window(wid)]
@@ -569,7 +783,6 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
             return wid
 
     # 2. Tier 2: Match project_hint in window title across open developer windows
-    # (Matches the specific VS Code workspace or Terminal project folder even if user switched away to browser)
     if project_hint:
         for wid, name, wpid in managed_windows:
             if project_hint in name.lower():
@@ -577,13 +790,9 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
                     save_session_window(session_id, wid, project_hint, wpid)
                 return wid
 
-    # 3. Tier 3: Match window from TTY / pts if provided
-    if caller_tty:
-        tty_window = find_window_by_tty(caller_tty, terminal_screen=terminal_screen)
-        if tty_window and is_developer_window(tty_window):
-            if session_id:
-                save_session_window(session_id, tty_window, project_hint, caller_pid)
-            return tty_window
+    # 3. Tier 3: Match window from TTY (Linux only)
+    if not IS_WINDOWS and caller_tty:
+        pass
 
     # 4. Tier 4: Explicit window_id_arg if valid
     if window_id_arg and str(window_id_arg).strip().isdigit():
@@ -593,22 +802,27 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
                 save_session_window(session_id, wid, project_hint, caller_pid)
             return wid
 
-    # 5. Tier 5: Fallback to active window
-    try:
-        res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
-        active_wid = res.decode().strip()
-        if active_wid and is_developer_window(active_wid):
-            if session_id:
-                save_session_window(session_id, active_wid, project_hint, caller_pid)
-            return active_wid
-    except Exception:
-        pass
+    # 5. Tier 5: Fallback to current active window
+    active_wid = get_current_active_window()
+    if active_wid and is_developer_window(active_wid):
+        if session_id:
+            save_session_window(session_id, active_wid, project_hint, caller_pid)
+        return active_wid
 
     return ""
 
 
 def get_current_active_window():
-    """Returns the currently active X11 window ID in decimal format, or empty string."""
+    """Returns the currently active window ID in decimal format, or empty string."""
+    if IS_WINDOWS:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd and ctypes.windll.user32.IsWindow(hwnd):
+                return str(hwnd)
+        except Exception:
+            pass
+        return ""
+
     try:
         res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
         wid = res.decode().strip()
@@ -620,9 +834,7 @@ def get_current_active_window():
 
 
 def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id=""):
-    """
-    Checks if active_wid corresponds to the target application window that triggered the notification.
-    """
+    """Checks if active_wid corresponds to the target application window that triggered the notification."""
     if not active_wid or not str(active_wid).strip().isdigit():
         return False
     active_wid_str = str(active_wid).strip()
@@ -641,16 +853,23 @@ def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hin
     # 3. Match PID tree
     if caller_pid and int(caller_pid) > 0:
         try:
-            wpid_str = subprocess.check_output(["xdotool", "getwindowpid", active_wid_str], stderr=subprocess.DEVNULL).decode().strip()
-            if wpid_str.isdigit():
-                wpid = int(wpid_str)
-                pid_tree = get_process_ancestors(caller_pid)
-                if wpid in pid_tree:
+            if IS_WINDOWS:
+                pid = wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(int(active_wid_str), ctypes.byref(pid))
+                wpid = pid.value
+                if wpid and wpid in get_process_ancestors(caller_pid):
                     return True
+            else:
+                wpid_str = subprocess.check_output(["xdotool", "getwindowpid", active_wid_str], stderr=subprocess.DEVNULL).decode().strip()
+                if wpid_str.isdigit():
+                    wpid = int(wpid_str)
+                    pid_tree = get_process_ancestors(caller_pid)
+                    if wpid in pid_tree:
+                        return True
         except Exception:
             pass
 
-    # 4. Match project hint in active window title (developer windows only)
+    # 4. Match project hint in active window title
     if project_hint and str(project_hint).strip():
         try:
             if is_developer_window(active_wid_str):
@@ -673,163 +892,29 @@ def get_queue_key(session_id="", window_id="", caller_pid=0, project_hint=""):
         w = str(window_id).strip()
         return w if w.startswith("win_") else f"win_{w}"
     if caller_pid and int(caller_pid) > 0:
-        return f"pid_{int(caller_pid)}"
+        return f"pid_{caller_pid}"
     if project_hint and str(project_hint).strip():
-        p = str(project_hint).strip().lower()
-        return p if p.startswith("proj_") else f"proj_{p}"
-    return "default_item"
-
-
-def load_notification_queue():
-    """Loads all pending notifications from disk, pruning expired entries (> 24h)."""
-    if not os.path.exists(QUEUE_CACHE_FILE):
-        return {}
-    now = time.time()
-    try:
-        with open(QUEUE_CACHE_FILE, "r") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            valid_queue = {}
-            for k, v in data.items():
-                if isinstance(v, dict) and (now - v.get("created_at", 0) < 86400):
-                    valid_queue[k] = v
-            return valid_queue
-    except Exception:
-        pass
-    return {}
-
-
-def save_to_queue(key, notif_dict):
-    """Saves or updates a pending notification in the queue."""
-    if not key or not notif_dict:
-        return
-    queue = load_notification_queue()
-    queue[key] = notif_dict
-    try:
-        with open(QUEUE_CACHE_FILE, "w") as f:
-            json.dump(queue, f)
-    except Exception:
-        pass
-
-
-def remove_from_queue(key):
-    """Removes a notification from the pending queue when resolved or dismissed."""
-    if not key:
-        return
-    queue = load_notification_queue()
-    if key in queue:
-        del queue[key]
-        try:
-            with open(QUEUE_CACHE_FILE, "w") as f:
-                json.dump(queue, f)
-        except Exception:
-            pass
-
-
-def get_next_pending_notification(exclude_key=""):
-    """
-    Returns the next pending notification from another window/session in the queue.
-    Prefers the oldest pending notification (FIFO) to ensure fairness across multiple agent tasks.
-    """
-    queue = load_notification_queue()
-    pending = []
-    for k, v in queue.items():
-        if k != exclude_key and isinstance(v, dict):
-            wid = v.get("target_window_id")
-            if wid and not is_valid_toplevel_window(wid):
-                refound_wid = find_target_window(
-                    window_id_arg="",
-                    caller_pid=v.get("caller_pid", 0),
-                    project_hint=v.get("project_hint", ""),
-                    session_id=v.get("session_id", ""),
-                )
-                if refound_wid:
-                    v["target_window_id"] = refound_wid
-                    pending.append((v.get("created_at", 0), k, v))
-                else:
-                    remove_from_queue(k)
-                    continue
-            else:
-                pending.append((v.get("created_at", 0), k, v))
-
-    if not pending:
-        return None, None
-
-    pending.sort(key=lambda x: x[0])
-    _, next_key, next_item = pending[0]
-    return next_key, next_item
-
-
-def pop_next_notification_async(exclude_key=""):
-    """Asynchronously triggers the next pending notification from another window using a detached subshell."""
-    next_key, next_item = get_next_pending_notification(exclude_key=exclude_key)
-    if not next_item:
-        return
-
-    import shlex
-
-    cmd = [
-        sys.executable,
-        os.path.abspath(__file__),
-        f"--app-name={next_item.get('app_name', 'AI Agent')}",
-        f"--title={next_item.get('title', 'Notification')}",
-        f"--message={next_item.get('message', '')}",
-        f"--questions-json={next_item.get('questions_json', '')}",
-        f"--urgency={next_item.get('urgency', 'normal')}",
-        f"--window-id={next_item.get('target_window_id', '')}",
-        f"--caller-pid={next_item.get('caller_pid', 0)}",
-        f"--project-hint={next_item.get('project_hint', '')}",
-        f"--session-id={next_item.get('session_id', '')}",
-        f"--timeout={next_item.get('timeout', 0)}",
-        f"--sound={next_item.get('sound', '')}",
-        "--from-queue",
-    ]
-    try:
-        cmd_str = " ".join(shlex.quote(c) for c in cmd)
-        subprocess.Popen(
-            ["bash", "-c", f"(sleep 0.25 && exec {cmd_str}) >/dev/null 2>&1 &"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-    except Exception:
-        pass
+        return f"proj_{str(project_hint).strip()}"
+    return "default_target"
 
 
 def get_window_workspace(wid):
-    """
-    Returns the workspace (desktop index) where the window currently resides.
-    Returns:
-        int: workspace index >= 0
-        -1: window is sticky (present on all workspaces)
-        None: workspace could not be determined
-    """
-    if not wid:
+    """Linux X11: Returns the workspace where the window resides."""
+    if IS_WINDOWS or not wid:
         return None
     wid_str = str(wid).strip()
     if not wid_str.isdigit():
         return None
 
-    # 1. Try xdotool get_desktop_for_window
     try:
-        out = subprocess.check_output(
-            ["xdotool", "get_desktop_for_window", wid_str],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
+        out = subprocess.check_output(["xdotool", "get_desktop_for_window", wid_str], stderr=subprocess.DEVNULL).decode().strip()
         if out.lstrip("-").isdigit():
-            desk = int(out)
-            return desk
+            return int(out)
     except Exception:
         pass
 
-    # 2. Try xprop _NET_WM_DESKTOP
     try:
-        out = subprocess.check_output(
-            ["xprop", "-id", wid_str, "_NET_WM_DESKTOP"],
-            stderr=subprocess.DEVNULL,
-        ).decode()
+        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_DESKTOP"], stderr=subprocess.DEVNULL).decode()
         if "=" in out:
             val = out.split("=")[1].strip()
             if val.isdigit():
@@ -839,66 +924,40 @@ def get_window_workspace(wid):
                 return desk
     except Exception:
         pass
-
     return None
 
 
 def switch_to_window_workspace(wid):
-    """
-    Switches current workspace/virtual desktop to the workspace containing the window.
-    """
-    if not wid:
+    """Linux X11: Switches virtual desktop to the workspace containing the window."""
+    if IS_WINDOWS or not wid:
         return False
     wid_str = str(wid).strip()
     if not wid_str.isdigit():
         return False
 
     target_desk = get_window_workspace(wid_str)
-    # If target workspace is sticky (-1), no need to switch workspace
     if target_desk == -1:
         return True
 
-    # 1. Try xdotool set_desktop_to_window
     try:
-        subprocess.run(
-            ["xdotool", "set_desktop_to_window", wid_str],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        subprocess.run(["xdotool", "set_desktop_to_window", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
-    # 2. Fallback to explicit workspace switch if target_desk is a non-negative number
     if target_desk is not None and target_desk >= 0:
         try:
-            subprocess.run(
-                ["xdotool", "set_desktop", str(target_desk)],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            subprocess.run(["xdotool", "set_desktop", str(target_desk)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-
         try:
-            subprocess.run(
-                ["wmctrl", "-s", str(target_desk)],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            subprocess.run(["wmctrl", "-s", str(target_desk)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
-
     return True
 
 
 def focus_target_window(window_id):
-    """
-    Activates and brings to front the specified window ID using workspace switching,
-    GDK native and xdotool / EWMH.
-    """
+    """Activates and brings to front the specified target window ID."""
     if not window_id:
         return False
 
@@ -906,13 +965,51 @@ def focus_target_window(window_id):
     if not wid_str.isdigit():
         return False
 
-    wid_int = int(wid_str)
+    if IS_WINDOWS:
+        try:
+            hwnd = int(wid_str)
+            if not ctypes.windll.user32.IsWindow(hwnd):
+                return False
 
-    # 0. Switch to window's workspace first so the window is visible
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            # Restore if minimized (SW_RESTORE = 9)
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)
+            else:
+                user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+            # AttachThreadInput trick to bypass Windows foreground lock
+            fg_hwnd = user32.GetForegroundWindow()
+            fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd else 0
+            target_thread = user32.GetWindowThreadProcessId(hwnd, None)
+            cur_thread = kernel32.GetCurrentThreadId()
+
+            attached_fg = False
+            attached_cur = False
+            if fg_thread != target_thread and fg_thread != 0:
+                attached_fg = bool(user32.AttachThreadInput(fg_thread, target_thread, True))
+            if cur_thread != target_thread:
+                attached_cur = bool(user32.AttachThreadInput(cur_thread, target_thread, True))
+
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+
+            if attached_fg:
+                user32.AttachThreadInput(fg_thread, target_thread, False)
+            if attached_cur:
+                user32.AttachThreadInput(cur_thread, target_thread, False)
+            return True
+        except Exception:
+            return False
+
+    # Linux implementation
+    wid_int = int(wid_str)
     switch_to_window_workspace(wid_str)
     time.sleep(0.05)
 
-    # 1. Native GDK / GdkX11 focus
     try:
         import gi
         gi.require_version("Gdk", "3.0")
@@ -927,18 +1024,11 @@ def focus_target_window(window_id):
     except Exception:
         pass
 
-    # 2. Try wmctrl -i -a (EWMH standard activation with workspace switch support)
     try:
-        subprocess.run(
-            ["wmctrl", "-i", "-a", wid_str],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        subprocess.run(["wmctrl", "-i", "-a", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
 
-    # 3. Xdotool windowactivate, windowraise, and windowfocus
     try:
         subprocess.run(["xdotool", "windowactivate", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["xdotool", "windowraise", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -949,10 +1039,7 @@ def focus_target_window(window_id):
 
 
 def focus_active_or_queued_notification():
-    """
-    Directly focuses the application window of the currently active or oldest pending notification.
-    Pops the next notification from queue if available.
-    """
+    """Directly focuses the application window of the currently active or oldest pending notification."""
     queue = load_notification_queue()
     if queue:
         pending = []
@@ -1000,7 +1087,7 @@ def focus_active_or_queued_notification():
     # Final fallback: try to find any active developer window
     managed = get_all_managed_windows()
     for wid, name, _ in managed:
-        if any(dev in name.lower() for dev in ["visual studio code", "code", "terminal", "alacritty", "kitty"]):
+        if any(dev in name.lower() for dev in ["visual studio code", "code", "terminal", "alacritty", "kitty", "cursor"]):
             focus_target_window(wid)
             return 0
 
@@ -1008,7 +1095,7 @@ def focus_active_or_queued_notification():
 
 
 def extract_summary_from_payload(questions_json_raw, fallback_message):
-    """Extracts clean text summary from payload if questions JSON provided."""
+    """Extracts clean text summary from payload if questions JSON is provided."""
     data = None
     if isinstance(questions_json_raw, str) and questions_json_raw.strip():
         try:
@@ -1062,18 +1149,9 @@ def is_boilerplate_message(text, tag_class):
             return True
 
     boilerplate_phrases = [
-        "đã hoàn thành",
-        "hoàn thành trả lời",
-        "hoàn thành công việc",
-        "hoàn thành nhiệm vụ",
-        "hoàn thành lượt làm việc",
-        "completed",
-        "finished",
-        "đang chờ bạn",
-        "đang chờ bạn tương tác",
-        "đang đặt câu hỏi cho bạn",
-        "cần bạn chú ý",
-        "ai agent đang chờ",
+        "đã hoàn thành", "hoàn thành trả lời", "hoàn thành công việc", "hoàn thành nhiệm vụ",
+        "hoàn thành lượt làm việc", "completed", "finished", "đang chờ bạn",
+        "đang chờ bạn tương tác", "đang đặt câu hỏi cho bạn", "cần bạn chú ý", "ai agent đang chờ",
     ]
 
     for phrase in boilerplate_phrases:
@@ -1087,7 +1165,250 @@ def is_boilerplate_message(text, tag_class):
     return False
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+# ---------------------------------------------------------------------------
+# Windows Multi-Monitor Overlay (Tkinter + Windows Toast)
+# ---------------------------------------------------------------------------
+def show_multi_monitor_popup_windows(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+    """Renders dark-themed notification overlay across connected displays on Windows."""
+    display_text = extract_summary_from_payload(questions_json, message)
+
+    # 1. Dispatch native Windows Toast notification concurrently in background
+    send_windows_toast_async(app_name, title, display_text or "AI Agent đang chờ bạn.")
+
+    # 2. Render Tkinter overlay banners on connected screens
+    try:
+        import tkinter as tk
+    except Exception:
+        return
+
+    # Enable High DPI awareness on Windows
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    monitors = get_windows_monitors()
+    if not monitors:
+        monitors = [{"x": 0, "y": 0, "width": 1920, "height": 1080, "is_primary": True}]
+
+    bg_color = "#18181b"        # Slate dark
+    border_color = "#3b82f6"    # Primary blue
+    msg_color = "#e4e4e7"       # Zinc 200
+
+    category_text = "THÔNG BÁO"
+    if ":" in title:
+        category_text = title.split(":", 1)[1].strip().upper()
+    cat_lower = category_text.lower()
+    cat_color = "#38bdf8"
+    tag_class = "tag-info"
+    if any(k in cat_lower for k in ["hỏi", "question", "ask", "input"]):
+        cat_color = "#fbbf24"
+        border_color = "#fbbf24"
+        tag_class = "tag-question"
+    elif any(k in cat_lower for k in ["quyền", "permission", "grant", "exec", "run", "critical"]):
+        cat_color = "#f43f5e"
+        border_color = "#f43f5e"
+        tag_class = "tag-permission"
+    elif any(k in cat_lower for k in ["thành", "complete", "finish", "done", "success"]):
+        cat_color = "#34d399"
+        border_color = "#34d399"
+        tag_class = "tag-complete"
+
+    raw_agent = re.split(r'[:\-_]', app_name)[0].strip()
+    agent_name_text = raw_agent.upper() if raw_agent else "AI AGENT"
+
+    queue = load_notification_queue()
+    total_in_queue = len(queue)
+    queue_text = ""
+    if total_in_queue > 1:
+        queue_keys = list(queue.keys())
+        current_idx = (queue_keys.index(queue_key) + 1) if queue_key in queue_keys else 1
+        queue_text = f"[{current_idx}/{total_in_queue}]"
+
+    root = tk.Tk()
+    root.withdraw()
+
+    windows = []
+    closing = [False]
+
+    def handle_focus_and_close(event=None):
+        if closing[0]:
+            return
+        closing[0] = True
+
+        wid_to_focus = target_window_id
+        if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
+            wid_to_focus = find_target_window(
+                window_id_arg="",
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
+        if wid_to_focus:
+            focus_target_window(wid_to_focus)
+
+        if queue_key:
+            remove_from_queue(queue_key)
+
+        pop_next_notification_async(exclude_key=queue_key)
+
+        for w in windows:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        try:
+            root.quit()
+        except Exception:
+            pass
+
+    def handle_close_only(event=None):
+        if closing[0]:
+            return
+        closing[0] = True
+
+        if queue_key:
+            remove_from_queue(queue_key)
+
+        pop_next_notification_async(exclude_key=queue_key)
+
+        for w in windows:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        try:
+            root.quit()
+        except Exception:
+            pass
+
+    for mon in monitors:
+        win = tk.Toplevel(root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=border_color)
+
+        inner = tk.Frame(win, bg=bg_color, padx=14, pady=10)
+        inner.pack(fill=tk.BOTH, expand=True, padx=1.5, pady=1.5)
+
+        hdr = tk.Frame(inner, bg=bg_color)
+        hdr.pack(fill=tk.X, pady=(0, 4))
+
+        lbl_agent = tk.Label(hdr, text=agent_name_text, fg="#60a5fa", bg=bg_color, font=("Segoe UI", 9, "bold"))
+        lbl_agent.pack(side=tk.LEFT)
+
+        lbl_dot = tk.Label(hdr, text=" • ", fg="#71717a", bg=bg_color, font=("Segoe UI", 9))
+        lbl_dot.pack(side=tk.LEFT)
+
+        lbl_cat = tk.Label(hdr, text=category_text, fg=cat_color, bg=bg_color, font=("Segoe UI", 9, "bold"))
+        lbl_cat.pack(side=tk.LEFT)
+
+        if queue_text:
+            lbl_q = tk.Label(hdr, text=queue_text, fg="#a1a1aa", bg="#27272a", font=("Segoe UI", 8, "bold"), padx=4, pady=1)
+            lbl_q.pack(side=tk.RIGHT)
+
+        if not is_boilerplate_message(display_text, tag_class):
+            clean_msg = clean_text(display_text, limit=260)
+            lbl_msg = tk.Label(inner, text=clean_msg, fg=msg_color, bg=bg_color, font=("Segoe UI", 10), justify=tk.LEFT, wraplength=480)
+            lbl_msg.pack(fill=tk.X, pady=(2, 6), anchor="w")
+
+        btn_frame = tk.Frame(inner, bg=bg_color)
+        btn_frame.pack(fill=tk.X, pady=(4, 0))
+
+        btn_focus = tk.Button(
+            btn_frame,
+            text="Đến cửa sổ [Alt+Q]",
+            bg="#2563eb",
+            fg="#ffffff",
+            activebackground="#1d4ed8",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.FLAT,
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=handle_focus_and_close
+        )
+        btn_focus.pack(side=tk.LEFT)
+
+        btn_close = tk.Button(
+            btn_frame,
+            text="✕ Đóng [Esc]",
+            bg="#3f3f46",
+            fg="#e4e4e7",
+            activebackground="#52525b",
+            activeforeground="#ffffff",
+            font=("Segoe UI", 9),
+            relief=tk.FLAT,
+            padx=10,
+            pady=4,
+            cursor="hand2",
+            command=handle_close_only
+        )
+        btn_close.pack(side=tk.RIGHT)
+
+        for key in ["<Return>", "<KP_Enter>", "<space>", "<f>", "<F>", "<y>", "<Y>"]:
+            win.bind(key, handle_focus_and_close)
+        for key in ["<Escape>", "<q>", "<Q>", "<n>", "<N>"]:
+            win.bind(key, handle_close_only)
+
+        win.update_idletasks()
+        win_w = max(460, min(560, int(mon["width"] * 0.32)))
+        win_h = inner.winfo_reqheight() + 4
+        win_x = mon["x"] + (mon["width"] - win_w) // 2
+        win_y = mon["y"] + 30
+        win.geometry(f"{win_w}x{win_h}+{win_x}+{win_y}")
+
+        windows.append(win)
+
+    if auto_dismiss_delay > 0:
+        active_since = [None]
+        def check_active_timer():
+            if closing[0]:
+                return
+            nonlocal target_window_id
+            if not target_window_id or not is_valid_toplevel_window(target_window_id):
+                target_window_id = find_target_window(
+                    window_id_arg="",
+                    caller_pid=caller_pid,
+                    project_hint=project_hint,
+                    session_id=session_id,
+                )
+            active_wid = get_current_active_window()
+            if active_wid and is_target_window_active(
+                active_wid,
+                target_wid=target_window_id,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            ):
+                now = time.time()
+                if active_since[0] is None:
+                    active_since[0] = now
+                elif (now - active_since[0]) >= auto_dismiss_delay:
+                    handle_close_only()
+                    return
+            else:
+                active_since[0] = None
+
+            root.after(250, check_active_timer)
+
+        root.after(250, check_active_timer)
+
+    if timeout > 0:
+        root.after(int(timeout * 1000), handle_close_only)
+
+    root.mainloop()
+
+
+# ---------------------------------------------------------------------------
+# Linux Multi-Monitor Overlay (GTK3 / GDK)
+# ---------------------------------------------------------------------------
+def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+    """Renders dark-themed notification overlay across connected displays on Linux via GTK3."""
     display_text = extract_summary_from_payload(questions_json, message)
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -1111,11 +1432,10 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             return
         n_monitors = display.get_n_monitors()
 
-        # Dark theme palette
-        bg_color = "#18181b"        # Slate dark
-        border_color = "#3b82f6"    # Primary blue border
-        title_color = "#ffffff"     # White title
-        msg_color = "#e4e4e7"       # Zinc 200 message
+        bg_color = "#18181b"
+        border_color = "#3b82f6"
+        title_color = "#ffffff"
+        msg_color = "#e4e4e7"
 
         css = f"""
         window.notification-window {{
@@ -1289,7 +1609,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.connect("realize", make_sticky)
             win.connect("map", make_sticky)
 
-            # EventBox to capture clicks on card background (close without focus)
             event_box = Gtk.EventBox()
             event_box.set_visible_window(True)
             event_box.get_style_context().add_class("notification-card")
@@ -1298,7 +1617,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             vbox_main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             vbox_main.get_style_context().add_class("banner-box")
 
-            # Header Box (Agent Badge + Category Tag)
             header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
             raw_agent = re.split(r'[:\-_]', app_name)[0].strip()
@@ -1327,7 +1645,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             header_box.pack_start(lbl_agent, False, False, 0)
             header_box.pack_start(lbl_cat, False, False, 0)
 
-            # Queue counter badge if multiple windows have pending notifications
             queue = load_notification_queue()
             total_in_queue = len(queue)
             if total_in_queue > 1:
@@ -1339,7 +1656,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
 
             vbox_main.pack_start(header_box, False, False, 0)
 
-            # Show message text only when it contains meaningful custom content (questions, permissions, etc.)
             if not is_boilerplate_message(display_text, tag_class):
                 escaped_msg = GLib.markup_escape_text(clean_text(display_text, limit=260))
                 lbl_msg = Gtk.Label(xalign=0)
@@ -1349,7 +1665,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
                 lbl_msg.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
                 vbox_main.pack_start(lbl_msg, False, False, 0)
 
-            # Action Buttons Row
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             btn_box.set_margin_top(4)
 
@@ -1372,7 +1687,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.set_size_request(win_width, -1)
             win.set_default_size(win_width, -1)
 
-            # Center window at top of screen
             def on_size_allocate(w, alloc, gx, gw, gy):
                 win_x = gx + (gw - alloc.width) // 2
                 win_y = gy + 30
@@ -1394,7 +1708,6 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             win.stick()
             windows.append(win)
 
-        # Auto-dismiss when target window is active/focused by the user
         if auto_dismiss_delay > 0:
             active_since = [None]
 
@@ -1440,6 +1753,37 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
         send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
 
 
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+    """Platform dispatcher for multi-monitor popup."""
+    if IS_WINDOWS:
+        show_multi_monitor_popup_windows(
+            app_name, title, message,
+            questions_json=questions_json,
+            target_window_id=target_window_id,
+            timeout=timeout,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+            queue_key=queue_key,
+            auto_dismiss_delay=auto_dismiss_delay,
+        )
+    else:
+        show_multi_monitor_popup_linux(
+            app_name, title, message,
+            questions_json=questions_json,
+            target_window_id=target_window_id,
+            timeout=timeout,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+            queue_key=queue_key,
+            auto_dismiss_delay=auto_dismiss_delay,
+        )
+
+
+# ---------------------------------------------------------------------------
+# CLI Argument Parser & Entry Point
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Multi-monitor desktop notification")
     parser.add_argument("--app-name", default="System Notification")
@@ -1458,7 +1802,7 @@ def main():
     parser.add_argument("--capture-session", action="store_true", default=False)
     parser.add_argument("--focus", "-f", action="store_true", default=False, help="Focus the target application window waiting for input.")
     parser.add_argument("--from-queue", action="store_true", default=False, help="Indicates notification was popped from pending queue.")
-    parser.add_argument("--auto-dismiss-delay", type=float, default=1.5, help="Seconds to wait before automatically dismissing notification when target window is active (default: 1.5s, 0 to disable).")
+    parser.add_argument("--auto-dismiss-delay", type=float, default=1.5, help="Seconds to wait before automatically dismissing notification when target window is active.")
     parser.add_argument("--dedupe-seconds", type=int, default=2)
     parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
     parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
@@ -1470,38 +1814,47 @@ def main():
     if args.focus:
         sys.exit(focus_active_or_queued_notification())
 
-    # 0. Lifecycle management flags (update / uninstall / install)
+    # 0. Lifecycle management flags
     if args.update:
-        print("🔄 Updating AI Agent Desktop Notifier...")
-        user_home = os.path.expanduser("~")
-        update_cmd = os.path.join(user_home, ".local", "bin", "ai-agent-notifier-update")
-        if os.path.exists(update_cmd) and os.access(update_cmd, os.X_OK):
-            subprocess.run([update_cmd], check=False)
+        print("[INFO] Dang cap nhat AI Agent Desktop Notifier...")
+        if IS_WINDOWS:
+            script_dir = Path(__file__).resolve().parent.parent
+            local_update = script_dir / "update.ps1"
+            if local_update.exists():
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_update)], check=False)
+            else:
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.ps1 | iex"], check=False)
         else:
             subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash"], check=False)
         return
 
     if args.uninstall:
-        print("🗑️  Uninstalling AI Agent Desktop Notifier...")
-        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local_uninstall = os.path.join(script_dir, "uninstall.sh")
-        if os.path.exists(local_uninstall) and os.access(local_uninstall, os.X_OK):
-            subprocess.run([local_uninstall], check=False)
+        print("[INFO] Dang go cai dat AI Agent Desktop Notifier...")
+        if IS_WINDOWS:
+            script_dir = Path(__file__).resolve().parent.parent
+            local_uninstall = script_dir / "uninstall.ps1"
+            if local_uninstall.exists():
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_uninstall)], check=False)
+            else:
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.ps1 | iex"], check=False)
         else:
             subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash"], check=False)
         return
 
     if args.install:
-        print("📦 Installing AI Agent Desktop Notifier...")
-        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local_install = os.path.join(script_dir, "install.sh")
-        if os.path.exists(local_install) and os.access(local_install, os.X_OK):
-            subprocess.run([local_install], check=False)
+        print("[INFO] Dang cai dat AI Agent Desktop Notifier...")
+        if IS_WINDOWS:
+            script_dir = Path(__file__).resolve().parent.parent
+            local_install = script_dir / "install.ps1"
+            if local_install.exists():
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_install)], check=False)
+            else:
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.ps1 | iex"], check=False)
         else:
             subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash"], check=False)
         return
 
-    # 1. Session capture mode (Pure side-effect, 0ms execution without rendering UI)
+    # 1. Session capture mode
     if args.capture_session:
         target_wid = find_target_window(
             window_id_arg=args.window_id,
@@ -1517,14 +1870,14 @@ def main():
 
     message = clean_text(args.message)
 
-    # 2. Deduplication check (Skip duplicate notification spam unless popped from queue)
+    # 2. Deduplication check
     if not args.from_queue and is_duplicate_notification(args.app_name, args.title, message, args.dedupe_seconds):
         return
 
-    # 2. Kill previous popup instance if running
+    # 3. Kill previous popup instance
     kill_previous_instance()
 
-    # 3. Find target window to focus
+    # 4. Find target window to focus
     target_window_id = find_target_window(
         window_id_arg=args.window_id,
         caller_pid=args.caller_pid,
@@ -1534,7 +1887,7 @@ def main():
         session_id=args.session_id,
     )
 
-    # 4. Manage pending notification queue
+    # 5. Manage pending notification queue
     queue_key = get_queue_key(
         session_id=args.session_id,
         window_id=target_window_id,
@@ -1564,14 +1917,14 @@ def main():
     else:
         remove_from_queue(queue_key)
 
-    # 5. Play sound asynchronously
+    # 6. Play sound asynchronously
     if args.sound:
         play_sound_async(args.sound)
 
-    # 6. Dispatch optional webhooks asynchronously
+    # 7. Dispatch optional webhooks asynchronously
     dispatch_webhooks_async(args.app_name, args.title, message)
 
-    # 7. Display desktop popup on connected monitors
+    # 8. Display desktop popup on connected monitors
     show_multi_monitor_popup(
         args.app_name,
         args.title,

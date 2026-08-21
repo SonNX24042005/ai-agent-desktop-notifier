@@ -117,9 +117,13 @@ except Exception:
 echo "=== 2. Removing notification scripts & caches ==="
 rm -f "$LOCAL_BIN/multi-desktop-notify.py"
 rm -f "$LOCAL_BIN/anoti"
+rm -f "$LOCAL_BIN/anoti.cmd"
+rm -f "$LOCAL_BIN/anoti.ps1"
 rm -f "$CLAUDE_HOOKS/notify-input.sh"
+rm -f "$CLAUDE_HOOKS/notify-claude.py"
 rm -f "$CODEX_DIR/notify.py"
 rm -f "$GEMINI_HOOKS/notify-antigravity.sh"
+rm -f "$GEMINI_HOOKS/notify-antigravity.py"
 rm -f /tmp/ai_agent_notifier*
 
 echo "=== 3. Uninstallation Complete ==="

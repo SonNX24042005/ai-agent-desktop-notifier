@@ -126,6 +126,15 @@ if "invocationNum" in data or event_name == "PreInvocation":
     sys.exit(0)
 
 def is_genuine_antigravity_completion(payload):
+    """
+    Strictly verifies if Antigravity has genuinely completed its turn and is waiting
+    for the user's next prompt, preventing premature completion notifications during:
+    - Multi-step tool executions
+    - Active background tasks / timers (status == RUNNING)
+    - Interim status messages
+    - Errors / Quota exhaustion
+    - ask_question modal wait states
+    """
     if payload.get("fullyIdle") is False:
         return False
 
@@ -148,6 +157,7 @@ def is_genuine_antigravity_completion(payload):
     if not is_stop_event:
         return False
 
+    # Check transcript for active background tasks, pending questions, or interim status
     transcript_path = payload.get("transcriptPath")
     if transcript_path:
         candidate_paths = [

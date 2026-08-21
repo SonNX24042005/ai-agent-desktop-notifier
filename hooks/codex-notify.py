@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
+"""
+OpenAI Codex hook and notify handler for desktop notifications.
+Cross-platform support for Linux and Windows.
+"""
 
 import json
 import os
 import subprocess
 import sys
 
-MULTI_NOTIFY = "/home/samer/.local/bin/multi-desktop-notify.py"
-PYTHON3 = "/usr/bin/python3"
-SOUND_WARNING = "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
-SOUND_COMPLETE = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
+
+USER_HOME = os.environ.get("USERPROFILE") or os.environ.get("HOME") or os.path.expanduser("~")
+MULTI_NOTIFY = os.path.join(USER_HOME, ".local", "bin", "multi-desktop-notify.py")
+PYTHON3 = sys.executable or ("python" if IS_WINDOWS else "/usr/bin/python3")
+
+SOUND_WARNING = "" if IS_WINDOWS else "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
+SOUND_COMPLETE = "" if IS_WINDOWS else "/usr/share/sounds/freedesktop/stereo/complete.oga"
 
 
 def clean_text(value, limit=400):
@@ -21,7 +29,9 @@ def clean_text(value, limit=400):
 
 
 def find_caller_tty(start_pid):
-    """Find the pts inherited by the agent, even when the hook stdin is a pipe."""
+    """Linux only: Find the pts inherited by the agent."""
+    if IS_WINDOWS:
+        return ""
     pid = int(start_pid or 0)
     visited = set()
 
@@ -45,21 +55,31 @@ def find_caller_tty(start_pid):
     return ""
 
 
+def get_active_window_id():
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                return str(hwnd)
+        except Exception:
+            pass
+        return ""
+    try:
+        return subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return ""
+
+
 def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0, session_id=""):
     msg = clean_text(message)
-
-    caller_window = ""
-    try:
-        caller_window = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
-    except Exception:
-        caller_window = ""
-
-    caller_pid = os.getppid()
+    caller_window = get_active_window_id()
+    caller_pid = os.getppid() if hasattr(os, "getppid") else 0
     caller_tty = find_caller_tty(os.getpid())
     terminal_screen = os.environ.get("GNOME_TERMINAL_SCREEN", "")
-    project_hint = os.path.basename(os.getcwd().rstrip("/")) if os.getcwd() != "/" else ""
+    project_hint = os.path.basename(os.getcwd().rstrip("/\\")) if os.getcwd() not in ["/", "\\"] else ""
 
-    if os.access(MULTI_NOTIFY, os.X_OK):
+    if os.path.exists(MULTI_NOTIFY):
         try:
             cmd = [
                 PYTHON3,
@@ -81,12 +101,15 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
             if questions_json:
                 cmd.append(f"--questions-json={questions_json}")
 
+            creationflags = 0x08000000 if IS_WINDOWS else 0
+            start_session = False if IS_WINDOWS else True
             subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True,
+                start_new_session=start_session,
+                creationflags=creationflags,
             )
             return
         except Exception:
