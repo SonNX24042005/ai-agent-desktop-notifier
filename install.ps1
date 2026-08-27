@@ -98,26 +98,33 @@ try:
     if claude_path.exists():
         with open(claude_path, "r", encoding="utf-8") as f:
             cdata = json.load(f)
+    if not isinstance(cdata, dict):
+        cdata = {}
+    if "hooks" not in cdata or not isinstance(cdata["hooks"], dict):
+        cdata["hooks"] = {}
+
     hook_cmd = f'python "{claude_hook}"'
-    cdata["hooks"] = {
-        "SessionStart": [
-            {"hooks": [{"type": "command", "command": hook_cmd}]}
-        ],
-        "PreToolUse": [
-            {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd}]}
-        ],
+    target_hooks = {
+        "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+        "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd}]}],
         "Notification": [
             {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": hook_cmd}]},
             {"matcher": "agent_completed", "hooks": [{"type": "command", "command": hook_cmd}]}
         ],
-        "Stop": [
-            {"hooks": [{"type": "command", "command": hook_cmd}]}
-        ]
+        "Stop": [{"hooks": [{"type": "command", "command": hook_cmd}]}]
     }
+
+    for event, new_entries in target_hooks.items():
+        if event not in cdata["hooks"] or not isinstance(cdata["hooks"][event], list):
+            cdata["hooks"][event] = []
+        filtered = [item for item in cdata["hooks"][event] if "notify-claude.py" not in json.dumps(item) and "notify-input.sh" not in json.dumps(item) and "ai-agent-desktop-notifier" not in json.dumps(item)]
+        filtered.extend(new_entries)
+        cdata["hooks"][event] = filtered
+
     claude_path.parent.mkdir(parents=True, exist_ok=True)
     with open(claude_path, "w", encoding="utf-8") as f:
         json.dump(cdata, f, indent=2)
-    print("- Merged Claude Code settings.json")
+    print("- Merged Claude Code settings.json (preserved other hooks)")
 except Exception as e:
     print(f"- [WARN] Claude Code config error: {e}")
 
@@ -146,20 +153,28 @@ try:
     if codex_hooks.exists():
         with open(codex_hooks, "r", encoding="utf-8") as f:
             data_hooks = json.load(f)
-    if "hooks" not in data_hooks:
+    if not isinstance(data_hooks, dict):
+        data_hooks = {"description": "Windows desktop notifications for Codex", "hooks": {}}
+    if "hooks" not in data_hooks or not isinstance(data_hooks["hooks"], dict):
         data_hooks["hooks"] = {}
-    data_hooks["hooks"]["PermissionRequest"] = [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": f'python "{codex_script}"',
-                    "timeout": 5,
-                    "statusMessage": "Sending Windows notification"
-                }
-            ]
-        }
-    ]
+
+    perm_h = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": f'python "{codex_script}"',
+                "timeout": 5,
+                "statusMessage": "Sending Windows notification"
+            }
+        ]
+    }
+    existing_perm = data_hooks["hooks"].get("PermissionRequest", [])
+    if not isinstance(existing_perm, list):
+        existing_perm = []
+    filtered_perm = [item for item in existing_perm if "notify.py" not in json.dumps(item)]
+    filtered_perm.append(perm_h)
+    data_hooks["hooks"]["PermissionRequest"] = filtered_perm
+
     with open(codex_hooks, "w", encoding="utf-8") as f:
         json.dump(data_hooks, f, indent=2)
     print("- Merged Codex hooks.json")
@@ -176,24 +191,29 @@ try:
     if gemini_settings_file.exists():
         with open(gemini_settings_file, "r", encoding="utf-8") as f:
             sdata = json.load(f)
-    if "hooks" not in sdata:
+    if not isinstance(sdata, dict):
+        sdata = {}
+    if "hooks" not in sdata or not isinstance(sdata["hooks"], dict):
         sdata["hooks"] = {}
-    sdata["hooks"]["PreInvocation"] = [
-        {"type": "command", "command": gemini_cmd, "timeout": 5}
-    ]
-    sdata["hooks"]["PreToolUse"] = [
-        {"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": gemini_cmd, "timeout": 10}]}
-    ]
-    sdata["hooks"]["Stop"] = [
-        {"type": "command", "command": gemini_cmd, "timeout": 10}
-    ]
-    sdata["hooks"]["Notification"] = [
-        {"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": gemini_cmd, "timeout": 10}]}
-    ]
+
+    target_gemini_hooks = {
+        "PreInvocation": [{"type": "command", "command": gemini_cmd, "timeout": 5}],
+        "PreToolUse": [{"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": gemini_cmd, "timeout": 10}]}],
+        "Stop": [{"type": "command", "command": gemini_cmd, "timeout": 10}],
+        "Notification": [{"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": gemini_cmd, "timeout": 10}]}],
+    }
+
+    for evt, entries in target_gemini_hooks.items():
+        if evt not in sdata["hooks"] or not isinstance(sdata["hooks"][evt], list):
+            sdata["hooks"][evt] = []
+        filtered = [item for item in sdata["hooks"][evt] if "notify-antigravity" not in json.dumps(item)]
+        filtered.extend(entries)
+        sdata["hooks"][evt] = filtered
+
     gemini_settings_file.parent.mkdir(parents=True, exist_ok=True)
     with open(gemini_settings_file, "w", encoding="utf-8") as f:
         json.dump(sdata, f, indent=2)
-    print("- Merged Antigravity settings.json")
+    print("- Merged Antigravity settings.json (preserved other hooks)")
 except Exception as e:
     print(f"- [WARN] Antigravity settings.json error: {e}")
 
@@ -203,6 +223,8 @@ try:
     if gemini_hooks_file.exists():
         with open(gemini_hooks_file, "r", encoding="utf-8") as f:
             gdata = json.load(f)
+    if not isinstance(gdata, dict):
+        gdata = {}
     gdata["desktop-notifier"] = {
         "PreInvocation": [
             {"type": "command", "command": gemini_cmd, "timeout": 5}

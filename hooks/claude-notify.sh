@@ -38,7 +38,7 @@ project_hint=""
 if [ "$event_name" = "SessionStart" ] || [ "$notif_type" = "SessionStart" ]; then
     if [ -x "$MULTI_NOTIFY" ]; then
         caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
-        caller_pid="$$"
+        caller_pid="$PPID"
         terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
         "$PYTHON3" "$MULTI_NOTIFY" \
             --capture-session \
@@ -60,13 +60,17 @@ fi
 is_question=0
 is_permission=0
 is_completion=0
+event_type="info"
 
 if [[ "$payload" == *"AskUserQuestion"* ]] || [[ "$payload" =~ [Aa]sk[Qq]uestion ]]; then
     is_question=1
+    event_type="question"
 elif [[ "$payload" == *"permission_prompt"* ]] || [[ "$payload" == *"PermissionRequest"* ]]; then
     is_permission=1
+    event_type="permission"
 elif [[ "$payload" == *"agent_completed"* ]] || [[ "$payload" == *"\"Stop\""* ]]; then
     is_completion=1
+    event_type="complete"
 fi
 
 # If none of the genuine events matched, exit immediately (0ms)
@@ -146,8 +150,7 @@ if len(txt) > 400:
 print(txt)
 ' "$message" 2>/dev/null || printf '%s' "$message" | head -c 400)"
 
-caller_window="$(xdotool getactivewindow 2>/dev/null || echo "")"
-caller_pid="$$"
+caller_pid="$PPID"
 terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
 cwd_path="$(printf '%s' "$payload" | $JQ -r '.cwd // ""' 2>/dev/null)"
 project_hint=""
@@ -160,8 +163,8 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --message="$clean_message" \
         --questions-json="$questions_json" \
         --urgency="$urgency" \
+        --event-type="$event_type" \
         --sound="$sound" \
-        --window-id="$caller_window" \
         --caller-pid="$caller_pid" \
         --project-hint="$project_hint" \
         --terminal-screen="$terminal_screen" \

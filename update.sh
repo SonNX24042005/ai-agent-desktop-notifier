@@ -40,11 +40,21 @@ chmod +x "$LOCAL_BIN/multi-desktop-notify.py"
 cp "$SCRIPT_DIR/hooks/claude-notify.sh" "$CLAUDE_HOOKS/notify-input.sh"
 chmod +x "$CLAUDE_HOOKS/notify-input.sh"
 
+if [ -f "$SCRIPT_DIR/hooks/claude-notify.py" ]; then
+    cp "$SCRIPT_DIR/hooks/claude-notify.py" "$CLAUDE_HOOKS/notify-claude.py"
+    chmod +x "$CLAUDE_HOOKS/notify-claude.py"
+fi
+
 cp "$SCRIPT_DIR/hooks/codex-notify.py" "$CODEX_DIR/notify.py"
 chmod +x "$CODEX_DIR/notify.py"
 
 cp "$SCRIPT_DIR/hooks/antigravity-notify.sh" "$GEMINI_HOOKS/notify-antigravity.sh"
 chmod +x "$GEMINI_HOOKS/notify-antigravity.sh"
+
+if [ -f "$SCRIPT_DIR/hooks/antigravity-notify.py" ]; then
+    cp "$SCRIPT_DIR/hooks/antigravity-notify.py" "$GEMINI_HOOKS/notify-antigravity.py"
+    chmod +x "$GEMINI_HOOKS/notify-antigravity.py"
+fi
 
 if [ -f "$SCRIPT_DIR/bin/anoti" ]; then
     cp "$SCRIPT_DIR/bin/anoti" "$LOCAL_BIN/anoti"
@@ -65,24 +75,32 @@ if os.path.exists(claude_path):
             cdata = json.load(f)
     except Exception:
         cdata = {}
-    if "hooks" not in cdata:
+    if not isinstance(cdata, dict):
+        cdata = {}
+    if "hooks" not in cdata or not isinstance(cdata["hooks"], dict):
         cdata["hooks"] = {}
-    cdata["hooks"]["SessionStart"] = [
-        {"hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
-    ]
-    cdata["hooks"]["PreToolUse"] = [
-        {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
-    ]
-    cdata["hooks"]["Notification"] = [
-        {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]},
-        {"matcher": "agent_completed", "hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
-    ]
-    cdata["hooks"]["Stop"] = [
-        {"hooks": [{"type": "command", "command": f"{USER_HOME}/.claude/hooks/notify-input.sh"}]}
-    ]
+
+    claude_hook_cmd = f"{USER_HOME}/.claude/hooks/notify-input.sh"
+    target_hooks = {
+        "SessionStart": [{"hooks": [{"type": "command", "command": claude_hook_cmd}]}],
+        "PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": claude_hook_cmd}]}],
+        "Notification": [
+            {"matcher": "permission_prompt", "hooks": [{"type": "command", "command": claude_hook_cmd}]},
+            {"matcher": "agent_completed", "hooks": [{"type": "command", "command": claude_hook_cmd}]}
+        ],
+        "Stop": [{"hooks": [{"type": "command", "command": claude_hook_cmd}]}]
+    }
+
+    for event, new_entries in target_hooks.items():
+        if event not in cdata["hooks"] or not isinstance(cdata["hooks"][event], list):
+            cdata["hooks"][event] = []
+        filtered = [item for item in cdata["hooks"][event] if "notify-input.sh" not in json.dumps(item) and "notify-claude.py" not in json.dumps(item) and "ai-agent-desktop-notifier" not in json.dumps(item)]
+        filtered.extend(new_entries)
+        cdata["hooks"][event] = filtered
+
     with open(claude_path, "w") as f:
         json.dump(cdata, f, indent=2)
-    print("✓ Synced Claude Code settings.json")
+    print("✓ Synced Claude Code settings.json (preserved other hooks)")
 
 # 2. Codex (~/.codex/config.toml & ~/.codex/hooks.json)
 codex_cfg = os.path.join(USER_HOME, ".codex", "config.toml")
@@ -104,7 +122,9 @@ if os.path.exists(codex_hooks):
             data_hooks = json.load(f)
     except Exception:
         pass
-if "hooks" not in data_hooks:
+if not isinstance(data_hooks, dict):
+    data_hooks = {"description": "Ubuntu desktop notifications for Codex", "hooks": {}}
+if "hooks" not in data_hooks or not isinstance(data_hooks["hooks"], dict):
     data_hooks["hooks"] = {}
 
 perm_h = {
@@ -117,23 +137,16 @@ perm_h = {
         }
     ]
 }
-data_hooks["hooks"]["PermissionRequest"] = [perm_h]
+existing_perm = data_hooks["hooks"].get("PermissionRequest", [])
+if not isinstance(existing_perm, list):
+    existing_perm = []
+filtered_perm = [item for item in existing_perm if "notify.py" not in json.dumps(item)]
+filtered_perm.append(perm_h)
+data_hooks["hooks"]["PermissionRequest"] = filtered_perm
+
 with open(codex_hooks, "w") as f:
     json.dump(data_hooks, f, indent=2)
 print("✓ Synced Codex hooks.json")
-
-# 3. Antigravity (~/.gemini/config/hooks.json)
-gemini_config_dir = os.path.join(USER_HOME, ".gemini", "config")
-os.makedirs(gemini_config_dir, exist_ok=True)
-gemini_hooks_file = os.path.join(gemini_config_dir, "hooks.json")
-
-gdata = {}
-if os.path.exists(gemini_hooks_file):
-    try:
-        with open(gemini_hooks_file, "r") as f:
-            gdata = json.load(f)
-    except Exception:
-        gdata = {}
 
 # 3. Antigravity (~/.gemini/settings.json & ~/.gemini/config/hooks.json)
 hook_cmd = f"{USER_HOME}/.gemini/hooks/notify-antigravity.sh"
@@ -145,23 +158,28 @@ if os.path.exists(gemini_settings_file):
             sdata = json.load(f)
     except Exception:
         sdata = {}
-    if "hooks" not in sdata:
+    if not isinstance(sdata, dict):
+        sdata = {}
+    if "hooks" not in sdata or not isinstance(sdata["hooks"], dict):
         sdata["hooks"] = {}
-    sdata["hooks"]["PreInvocation"] = [
-        {"type": "command", "command": hook_cmd, "timeout": 5}
-    ]
-    sdata["hooks"]["PreToolUse"] = [
-        {"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
-    ]
-    sdata["hooks"]["Stop"] = [
-        {"type": "command", "command": hook_cmd, "timeout": 10}
-    ]
-    sdata["hooks"]["Notification"] = [
-        {"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}
-    ]
+
+    target_gemini_hooks = {
+        "PreInvocation": [{"type": "command", "command": hook_cmd, "timeout": 5}],
+        "PreToolUse": [{"matcher": "ask_question|AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}],
+        "Stop": [{"type": "command", "command": hook_cmd, "timeout": 10}],
+        "Notification": [{"matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 10}]}],
+    }
+
+    for evt, entries in target_gemini_hooks.items():
+        if evt not in sdata["hooks"] or not isinstance(sdata["hooks"][evt], list):
+            sdata["hooks"][evt] = []
+        filtered = [item for item in sdata["hooks"][evt] if "notify-antigravity" not in json.dumps(item)]
+        filtered.extend(entries)
+        sdata["hooks"][evt] = filtered
+
     with open(gemini_settings_file, "w") as f:
         json.dump(sdata, f, indent=2)
-    print("✓ Synced Antigravity settings.json (~/.gemini/settings.json)")
+    print("✓ Synced Antigravity settings.json (preserved other hooks)")
 
 gemini_config_dir = os.path.join(USER_HOME, ".gemini", "config")
 os.makedirs(gemini_config_dir, exist_ok=True)
@@ -174,6 +192,8 @@ if os.path.exists(gemini_hooks_file):
             gdata = json.load(f)
     except Exception:
         gdata = {}
+if not isinstance(gdata, dict):
+    gdata = {}
 
 gdata["desktop-notifier"] = {
     "PreInvocation": [

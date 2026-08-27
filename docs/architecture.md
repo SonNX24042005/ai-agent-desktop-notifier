@@ -67,6 +67,8 @@ Các quyết định thiết kế chính:
 | `uninstall.sh`, `uninstall.ps1` | Xóa artifact và cấu hình tích hợp | Khi installer bắt đầu sở hữu thêm dữ liệu |
 | `tests/test_focus_identity_and_timer.py` | Kiểm thử nhận diện cửa sổ, session cache, focus, queue và timer | Khi thay đổi logic identity hoặc vòng đời popup |
 | `tests/test_multi_monitor_notify.py` | Kiểm thử backend Linux và bố trí đa màn hình | Khi thay đổi chọn backend hoặc placement |
+| `tests/test_remediation_and_adapters.py` | Kiểm thử remediation bảo mật, hàng đợi, adapter và lifecycle | Khi sửa đổi logic locking, runtime dir hoặc unmerge |
+| `tests/test_agent_hooks_e2e.py` | Kiểm thử tích hợp mô phỏng toàn diện cho Google Antigravity, Claude Code và OpenAI Codex | Khi cập nhật hook payload hoặc sự kiện của agent |
 
 ## 4. Mô hình triển khai
 
@@ -117,14 +119,15 @@ Không nên đưa logic hiểu payload riêng của agent vào engine. Logic đ�
 
 CLI là giao diện thao tác thủ công và quản lý vòng đời:
 
-- `anoti focus`: focus thông báo cũ nhất đang chờ;
+- `anoti focus`: focus thông báo cũ nhất đang chờ (`Alt+Q`);
+- `anoti doctor`: kiểm tra chuyên sâu tính toàn vẹn hệ thống, dependencies và phát hiện lệch phiên bản giữa working tree với installed runtime;
 - `anoti test`: gửi một thông báo thử qua engine đã cài;
 - `anoti status`: kiểm tra sự tồn tại của engine và cấu hình tích hợp;
 - `anoti config`: tạo hoặc hiển thị cấu hình webhook;
 - `anoti install`, `update`, `uninstall`: gọi script theo nền tảng;
 - `anoti --title ... --message ...`: gửi thông báo tùy chỉnh.
 
-CLI luôn tìm engine trong `~/.local/bin`, không mặc định chạy engine trong repository.
+CLI luôn tìm engine trong `~/.local/bin`, không mặc định chạy engine trong repository. Khi làm việc trong repository, cần dùng `anoti doctor` để kiểm tra đồng bộ.
 
 ### 5.4. Script quản lý vòng đời
 
@@ -145,10 +148,11 @@ Payload khác nhau được chuẩn hóa thành các trường sau:
 | Tham số engine | Ý nghĩa |
 | --- | --- |
 | `--app-name` | Tên agent dùng cho nhãn và webhook |
-| `--title` | Tiêu đề đã phân loại, đồng thời đang được dùng để nhận biết thông báo hoàn thành |
+| `--title` | Tiêu đề phân loại hiển thị trên banner |
 | `--message` | Nội dung đã thu gọn khoảng trắng |
 | `--questions-json` | Payload câu hỏi để engine trích xuất tóm tắt hiển thị |
 | `--urgency` | `low`, `normal` hoặc `critical` |
+| `--event-type` | Loại sự kiện chuẩn hóa: `question`, `permission`, `complete`, `info` |
 | `--sound` | Đường dẫn âm thanh; Windows có thể dùng âm hệ thống khi rỗng |
 | `--window-id` | ID cửa sổ đang hoạt động tại thời điểm hook chạy |
 | `--caller-pid` | PID để lần ngược cây tiến trình |
@@ -186,10 +190,10 @@ Mục đích của luồng này là chụp cửa sổ khi quan hệ còn rõ rà
 1. Xử lý lệnh đặc biệt `focus`, `install`, `update`, `uninstall` hoặc `capture-session`.
 2. Làm sạch nội dung, giới hạn mặc định còn 300 ký tự.
 3. Bỏ qua bản trùng trong khoảng `dedupe_seconds`, mặc định là 2 giây.
-4. Kết thúc popup cũ bằng PID file để tránh chồng nhiều nhóm popup.
+4. Kết thúc popup cũ bằng PID file và kiểm tra danh tính tiến trình để tránh chồng nhiều nhóm popup.
 5. Tìm cửa sổ mục tiêu theo thuật toán identity nghiêm ngặt.
 6. Tạo khóa queue theo session, window, PID, project hoặc khóa mặc định.
-7. Nếu tiêu đề không phải hoàn thành, cập nhật item vào queue; nếu là hoàn thành, xóa item cùng khóa.
+7. Nếu loại sự kiện không phải hoàn thành, cập nhật item vào queue; nếu là hoàn thành, xóa item cùng khóa.
 8. Phát âm thanh và gửi webhook trong nền.
 9. Chọn backend theo hệ điều hành và hiển thị popup.
 
@@ -199,48 +203,52 @@ Mục đích của luồng này là chụp cửa sổ khi quan hệ còn rõ rà
 stateDiagram-v2
     [*] --> Pending: Lưu vào queue
     Pending --> Visible: Engine hiển thị
-    Visible --> Resolved: Người dùng đóng
+    Visible --> Dismissed: Người dùng đóng popup
     Visible --> Resolved: Target active liên tục đủ thời gian
     Visible --> FocusAttempt: Người dùng chọn đến cửa sổ
     FocusAttempt --> Resolved: Focus thành công
     FocusAttempt --> Pending: Focus thất bại
     Resolved --> Next: Lấy item cũ nhất còn lại
+    Dismissed --> Next: Không tự động pop lại nhưng giữ cho anoti focus
     Next --> Visible: Khởi chạy tiến trình mới với --from-queue
     Next --> [*]: Queue rỗng
 ```
 
 Khi focus bằng `anoti focus`, engine duyệt từ item cũ nhất. Item chỉ bị xóa sau khi focus đã được xác minh thành công. Nếu không có queue hợp lệ, engine thử session cache mới cập nhật gần nhất. Engine không focus một cửa sổ developer ngẫu nhiên.
 
-Trong popup, thao tác đóng và auto-dismiss được xem là đã xử lý thông báo nên xóa item hiện tại rồi mở item kế tiếp. Thao tác focus chỉ nên xóa item khi việc focus thành công.
+Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue.
 
-## 8. Thuật toán nhận diện cửa sổ
+## 8. Thuật toán nhận diện cửa sổ và chính sách focus
 
-`find_target_window()` dùng thứ tự hiện tại sau:
+`find_target_window()` áp dụng thứ tự phân giải 4 tầng nghiêm ngặt (ưu tiên độ chính xác tuyệt đối, không đoán mò):
 
-1. **Session cache**: lấy window ID đã lưu, kiểm tra cửa sổ còn tồn tại, thuộc ứng dụng developer và PID chưa bị tái sử dụng.
-2. **Cây PID**: liệt kê các cửa sổ developer có PID trong chuỗi tổ tiên của tiến trình hook. Chấp nhận khi chỉ có một kết quả; nếu có nhiều kết quả, yêu cầu `project_hint` hoặc `window_id` tạo ra lựa chọn duy nhất.
-3. **Tên dự án**: tìm `project_hint` trong tiêu đề toàn bộ cửa sổ developer. Chỉ chấp nhận đúng một kết quả.
-4. **Window ID trực tiếp**: kiểm tra cửa sổ hợp lệ, thuộc ứng dụng developer và không mâu thuẫn với cây PID.
-5. **GNOME Terminal trên Wayland**: nếu cây tiến trình cho thấy GNOME Terminal, dùng token đặc biệt `wayland:gnome-terminal` và kích hoạt qua D-Bus.
-6. **Không đoán**: trả chuỗi rỗng khi còn mơ hồ.
+1. **Tầng 0 (Session cache - Schema v2)**: Tra cứu window ID đã lưu tại `SessionStart` / `PreInvocation`. Thực hiện kiểm tra 3 bước: (a) Cửa sổ còn tồn tại và là developer window, (b) PID tiến trình sở hữu cửa sổ khớp với PID lúc capture (chống tái sử dụng HWND/WID), (c) Tiêu đề cửa sổ khớp hoặc tương thích với `title_fingerprint` / `project_hint`.
+2. **Tầng 1 (Cây tiến trình tổ tiên - Process Ancestry)**: Phân tích an toàn `/proc/{pid}/stat` (Linux) hoặc Toolhelp snapshot (Windows). Nếu có duy nhất 1 cửa sổ developer trong cây tiến trình -> chấp nhận; nếu có nhiều cửa sổ -> dùng `project_hint` để phân định duy nhất; nếu vẫn còn mơ hồ -> trả về rỗng (từ chối đoán).
+3. **Tầng 2 (Khớp Project Hint duy nhất)**: Tìm kiếm `project_hint` trong tiêu đề các cửa sổ developer đang mở. Chỉ chấp nhận khi tìm thấy đúng 1 cửa sổ duy nhất.
+4. **Tầng 3 (Window ID truyền trực tiếp)**: Kiểm tra window ID hợp lệ, thuộc ứng dụng developer và thuộc cây tiến trình tổ tiên của caller.
+5. **Tầng 4 (Wayland GNOME Terminal fallback)**: Kích hoạt GNOME Terminal qua D-Bus (`org.gnome.Terminal.Preferences`) khi chạy Wayland thuần.
+6. **Tầng 5 (An toàn tuyệt đối)**: Trả về chuỗi rỗng khi không thể xác định duy nhất mục tiêu. Tuyệt đối không chọn bừa cửa sổ ngẫu nhiên.
 
-Danh sách cho phép và loại trừ nằm trong `DEVELOPER_CLASSES`, `EXCLUDED_CLASSES` và `WIN_DEVELOPER_EXES`. Khi hỗ trợ IDE hoặc terminal mới, cần cập nhật nhận diện trên cả Linux và Windows, rồi bổ sung kiểm thử tránh false positive.
+### 8.1. Bộ đếm thời gian Monotonic (1,5 giây continuous active)
+- Sử dụng `time.monotonic()` và chu kỳ kiểm tra 100ms.
+- Trên X11 và Windows: Đối chiếu chính xác ID cửa sổ active (`_NET_ACTIVE_WINDOW` / `GetForegroundWindow`).
+- Trên Linux Wayland thuần: Nhận diện qua PTY điều khiển (`/dev/pts/*`) kết hợp kiểm tra foreground process group (`pgrp == tpgid` trong `/proc/{pid}/stat`) để bảo đảm tiến trình caller đang ở foreground của terminal.
+- Reset `active_since = None` ngay lập tức khi người dùng chuyển sang cửa sổ khác hoặc rời khỏi terminal.
+- Chỉ đóng thông báo và dequeue khi đúng cửa sổ nguồn active liên tục đủ 1,5 giây.
 
-### 8.1. Xác minh focus
+### 8.2. Xác minh và kích hoạt cửa sổ theo nền tảng
 
 Trên Windows, engine:
-
-- khôi phục cửa sổ nếu đang thu nhỏ;
-- dùng `AttachThreadInput`, `BringWindowToTop`, `SetForegroundWindow` và `SetActiveWindow`;
-- kiểm tra lại foreground window trong tối đa khoảng 0,4 giây.
+- Khôi phục cửa sổ nếu đang thu nhỏ (`IsIconic` -> `ShowWindow(hwnd, SW_RESTORE)` (9));
+- Vượt qua Foreground Lock bằng `AttachThreadInput` (kết nối foreground thread, target thread và current thread) kết hợp `SwitchToThisWindow(hwnd, True)`;
+- Gọi `BringWindowToTop`, `SetForegroundWindow`, `SetActiveWindow`;
+- Kiểm tra lại foreground window trong tối đa khoảng 0,4 giây.
 
 Trên Linux X11/XWayland, engine:
-
-- chuyển sang workspace chứa cửa sổ;
-- thử GDK X11, `wmctrl` và `xdotool`;
-- kiểm tra lại active window trong tối đa khoảng 0,4 giây.
-
-Trên GNOME Wayland thuần, token GNOME Terminal được kích hoạt qua `gdbus`. Với trường hợp compositor không cho phép đọc active window, tính hợp lệ của target là tín hiệu dự phòng.
+- Chuyển sang workspace chứa cửa sổ (`_NET_WM_DESKTOP`);
+- Gửi EWMH ClientMessage `_NET_ACTIVE_WINDOW` kèm timestamp `CurrentTime` và `source indication = 2`;
+- Gọi `gdk_win.focus()`, `wmctrl -i -a` và `xdotool windowactivate --sync`;
+- Kiểm tra lại active window trong tối đa khoảng 0,4 giây.
 
 ## 9. Trạng thái và dữ liệu runtime
 
@@ -252,10 +260,10 @@ Trên GNOME Wayland thuần, token GNOME Terminal được kích hoạt qua `gdb
 | `ai_agent_notifier_sessions.json` | Ánh xạ session sang identity cửa sổ | Giữ tối đa 64 entry, loại entry quá 24 giờ |
 | `ai_agent_notifier_sessions.lock` | Lock cho session cache | `flock` trên Linux, thư mục lock quay vòng trên Windows |
 | `ai_agent_notifier_dedupe.json` | SHA-256 của app, title, message và thời điểm gần nhất | Loại key cũ hơn 60 giây khi có lần kiểm tra mới |
-| `ai_agent_notifier_queue.json` | Các thông báo đang chờ theo identity | Bỏ qua item cũ hơn 4 giờ khi đọc |
-| `ai_agent_notifier_queue.lock` | Đã khai báo cho queue | Chưa được các hàm queue hiện tại sử dụng |
+| `ai_agent_notifier_queue.json` | Các thông báo đang chờ theo identity | Bọc transaction lock và atomic write, bỏ qua item cũ hơn 4 giờ |
+| `ai_agent_notifier_queue.lock` | Lock cho queue cache | Được toàn bộ hàm đọc/ghi queue sử dụng |
 
-Linux dùng `/tmp`; Windows dùng `%TEMP%` hoặc `%TMP%`.
+Thư mục runtime được cô lập an toàn: ưu tiên `$AI_AGENT_NOTIFIER_RUNTIME_DIR`, sau đó là `$XDG_RUNTIME_DIR/ai-agent-notifier` (Linux) hoặc `%LOCALAPPDATA%\ai-agent-notifier` (Windows), fallback `/tmp/ai-agent-notifier-<uid>` với quyền riêng tư `0700` / `0600`.
 
 ### 9.2. Schema session cache
 
@@ -287,12 +295,14 @@ Linux dùng `/tmp`; Windows dùng `%TEMP%` hoặc `%TMP%`.
     "message": "Nội dung đã làm sạch",
     "questions_json": "{}",
     "urgency": "critical",
+    "event_type": "question",
     "sound": "/path/to/sound.oga",
     "target_window_id": "12345",
     "caller_pid": 1234,
     "project_hint": "project-name",
     "session_id": "example",
     "timeout": 0,
+    "dismissed": false,
     "created_at": 1770000000.0
   }
 }

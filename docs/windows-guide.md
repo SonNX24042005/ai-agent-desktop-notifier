@@ -48,7 +48,7 @@ Hệ thống cung cấp cơ chế thông báo kép (dual notification) tối ưu
    - Hiển thị banner nổi dark-slate ở giữa phía trên từng màn hình.
    - Tự động điều chỉnh kích thước theo mật độ điểm ảnh (DPI awareness).
    - Hiển thị badge phân loại (`CÂU HỎI`, `CẦN CẤP QUYỀN`, `HOÀN THÀNH`), số đếm hàng đợi (ví dụ: `[1/3]`) và nội dung tóm tắt.
-   - Nút bấm trực quan *"Đến cửa sổ [Alt+Q]"* và *"✕ Đóng [Esc]"*.
+   - Nút bấm trực quan *"Đến cửa sổ (Alt+Q)"* và *"✕ Đóng"*.
 
 2. **Thông báo hệ thống (Windows native toast)**:
    - Đồng thời gửi thông báo chuẩn vào Action Center / Toast của Windows 10/11 trong nền.

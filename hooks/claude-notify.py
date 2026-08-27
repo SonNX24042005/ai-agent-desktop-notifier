@@ -87,16 +87,20 @@ if "idle_prompt" in raw_payload or "agent_needs_input" in raw_payload:
 is_question = False
 is_permission = False
 is_completion = False
+event_type = "info"
 
 tool_name = data.get("tool_name") or ""
 tool_input = data.get("tool_input") or {}
 
 if "AskUserQuestion" in raw_payload or "ask_question" in raw_payload.lower():
     is_question = True
+    event_type = "question"
 elif "permission_prompt" in raw_payload or "PermissionRequest" in raw_payload:
     is_permission = True
+    event_type = "permission"
 elif "agent_completed" in raw_payload or '"Stop"' in raw_payload or event_name == "Stop":
     is_completion = True
+    event_type = "complete"
 
 if not is_question and not is_permission and not is_completion:
     sys.exit(0)
@@ -145,8 +149,6 @@ clean_msg = " ".join(message.split())
 if len(clean_msg) > 400:
     clean_msg = clean_msg[:397] + "..."
 
-caller_win = get_active_window_id()
-
 if os.path.exists(MULTI_NOTIFY):
     cmd = [
         PYTHON3, MULTI_NOTIFY,
@@ -155,7 +157,7 @@ if os.path.exists(MULTI_NOTIFY):
         f"--message={clean_msg}",
         f"--questions-json={questions_json}",
         f"--urgency={urgency}",
-        f"--window-id={caller_win}",
+        f"--event-type={event_type}",
         f"--caller-pid={os.getppid()}",
         f"--project-hint={project_hint}",
         f"--session-id={session_id}",

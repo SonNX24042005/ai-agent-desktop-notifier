@@ -5,6 +5,13 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== Cap nhat AI Agent Desktop Notifier len ban moi nhat ===" -ForegroundColor Cyan
 
+$ScriptDir = $PSScriptRoot
+if ($ScriptDir -and (Test-Path (Join-Path $ScriptDir "install.ps1"))) {
+    Write-Host "=== Cap nhat tu thu muc ma nguon cuc bo ===" -ForegroundColor Cyan
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $ScriptDir "install.ps1")
+    exit 0
+}
+
 $TempZipDir = Join-Path $env:TEMP ("anoti_update_" + (Get-Random))
 New-Item -ItemType Directory -Force -Path $TempZipDir | Out-Null
 

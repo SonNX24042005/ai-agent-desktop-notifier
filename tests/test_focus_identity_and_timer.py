@@ -360,11 +360,77 @@ class TestGnomeTerminalWaylandSupport(unittest.TestCase):
             self.assertTrue(mdn.is_valid_toplevel_window(wid))
             self.assertTrue(mdn.is_developer_window(wid))
 
-    @patch.object(mdn, "activate_gnome_terminal_via_dbus", return_value=True)
-    def test_focus_target_window_wayland_gnome_terminal(self, mock_dbus):
-        success = mdn.focus_target_window("wayland:gnome-terminal")
-        self.assertTrue(success)
-        mock_dbus.assert_called_once()
+class TestProcStatParsing(unittest.TestCase):
+    """Tests for safe /proc/{pid}/stat parsing with spaces and special symbols in comm."""
+
+    def test_proc_stat_with_spaces_in_comm(self):
+        # E.g. process name "(claude code)" or "(python 3.12)"
+        mock_stat_content = "1234 (claude code) S 5678 1234 1234 0 -1 4194304"
+        with patch("builtins.open", unittest.mock.mock_open(read_data=mock_stat_content)):
+            with patch("os.path.exists", return_value=True):
+                # When current pid is 1234, ancestors should include parent 5678
+                if not mdn.IS_WINDOWS:
+                    ancestors = mdn.get_process_ancestors(1234)
+                    self.assertIn(5678, ancestors)
+
+
+class TestTitleFingerprint(unittest.TestCase):
+    """Tests for title fingerprint normalization and fuzzy compatibility."""
+
+    def test_normalize_title_strips_spinners(self):
+        raw = "⠋ Claude Code - my-project"
+        norm = mdn.normalize_title(raw)
+        self.assertIn("claude code", norm)
+        self.assertNotIn("⠋", norm)
+
+    def test_titles_compatible(self):
+        t1 = "Claude Code - my-project"
+        t2 = "⠙ Claude Code - my-project [running]"
+        self.assertTrue(mdn.titles_compatible(t1, t2))
+        self.assertFalse(mdn.titles_compatible("VS Code - ProjectA", "Google Chrome - Youtube"))
+
+
+class TestGenerationAndState(unittest.TestCase):
+    """Tests for monotonic generation counter and schema v2 integrity."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.orig_runtime = mdn.RUNTIME_DIR
+        mdn.RUNTIME_DIR = self.tmp_dir.name
+
+    def tearDown(self):
+        mdn.RUNTIME_DIR = self.orig_runtime
+        self.tmp_dir.cleanup()
+
+    def test_generation_counter_strictly_increasing(self):
+        g1 = mdn.get_next_generation()
+        g2 = mdn.get_next_generation()
+        g3 = mdn.get_next_generation()
+        self.assertGreater(g2, g1)
+        self.assertGreater(g3, g2)
+
+    def test_schema_v2_stored(self):
+        with patch.object(mdn, "is_developer_window", return_value=True):
+            mdn.SESSION_CACHE_FILE = os.path.join(self.tmp_dir.name, "sessions.json")
+            mdn.SESSION_LOCK_FILE = os.path.join(self.tmp_dir.name, "sessions.lock")
+            mdn.save_session_window("sess_v2", "12345", project_hint="my-proj", pid=100)
+            info = mdn.get_session_window_info("sess_v2")
+            self.assertEqual(info.get("schema_version"), 2)
+            self.assertEqual(info.get("window_id_dec"), "12345")
+            self.assertIn("captured_at", info)
+
+
+class TestIsTargetWindowActiveNoTTY(unittest.TestCase):
+    """Tests that is_target_window_active strictly uses OS window ID and does NOT check TTY atime/mtime."""
+
+    def test_active_window_empty_returns_false(self):
+        self.assertFalse(mdn.is_target_window_active("", target_wid="12345"))
+
+    def test_foreign_window_returns_false(self):
+        self.assertFalse(mdn.is_target_window_active("99999", target_wid="12345"))
+
+    def test_matching_target_returns_true(self):
+        self.assertTrue(mdn.is_target_window_active("12345", target_wid="12345"))
 
 
 if __name__ == "__main__":

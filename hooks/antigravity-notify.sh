@@ -8,6 +8,7 @@ Cross-platform support for Linux and Windows.
 import sys
 import json
 import os
+import tempfile
 import subprocess
 
 IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
@@ -22,14 +23,6 @@ try:
 except Exception:
     raw_payload = ""
 
-# Debug log
-try:
-    log_dir = os.environ.get("TEMP") or "/tmp"
-    with open(os.path.join(log_dir, "antigravity_hook_debug.log"), "a", encoding="utf-8") as f:
-        f.write(f"[{os.getpid()}] {raw_payload.strip()}\n")
-except Exception:
-    pass
-
 if not raw_payload.strip():
     print("{}")
     sys.exit(0)
@@ -38,6 +31,20 @@ try:
     data = json.loads(raw_payload)
 except Exception:
     data = {}
+
+# Debug log (opt-in only with bounded size and private permissions)
+if os.environ.get("DEBUG_ANTIGRAVITY_HOOK") == "1":
+    try:
+        log_dir = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        log_path = os.path.join(log_dir, "antigravity_hook_debug.log")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(log_path, flags, 0o600)
+        with open(fd, "a", encoding="utf-8") as f:
+            f.write(f"[{os.getpid()}] event={data.get('hook_event_name') or data.get('event')}\n")
+    except Exception:
+        pass
 
 # 1. Fast-path: Ignore idle_prompt, agent_needs_input, and background initialization immediately (0ms)
 if (
@@ -118,6 +125,7 @@ if "invocationNum" in data or event_name == "PreInvocation":
             "--capture-session",
             f"--session-id={conversation_id}",
             f"--window-id={caller_win}",
+            f"--caller-pid={os.getppid()}",
             f"--project-hint={project_hint}",
         ]
         creationflags = 0x08000000 if IS_WINDOWS else 0
@@ -196,8 +204,6 @@ def is_genuine_antigravity_completion(payload):
                             tool_calls = step.get("tool_calls") or []
                             if any("ask" in (tc.get("name") or "").lower() for tc in tool_calls):
                                 return False
-                            if tool_calls and len(tool_calls) > 0:
-                                return False
                             break
                 except Exception:
                     pass
@@ -208,8 +214,22 @@ def is_genuine_antigravity_completion(payload):
 # 4. Check Question tool vs Completion vs Other tools
 is_question = tool_name in ["ask_question", "AskUserQuestion", "ask_user"] or ("ask" in tool_name.lower())
 is_completion = False if is_question else is_genuine_antigravity_completion(data)
+event_type = "info"
 
 if "toolCall" in data and not is_question:
+    if os.path.exists(MULTI_NOTIFY):
+        try:
+            creationflags = 0x08000000 if IS_WINDOWS else 0
+            subprocess.run(
+                [PYTHON3, MULTI_NOTIFY, f"--session-id={conversation_id}", "--dismiss"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                timeout=1,
+                creationflags=creationflags,
+            )
+        except Exception:
+            pass
     print('{"decision": "allow"}')
     sys.exit(0)
 
@@ -228,6 +248,7 @@ is_pre_tool = False
 
 if is_question:
     is_pre_tool = True
+    event_type = "question"
     title = "Antigravity: Câu hỏi"
     urgency = "critical"
     if not IS_WINDOWS:
@@ -244,6 +265,7 @@ if is_question:
     message = q_text or "Antigravity đang đặt câu hỏi cho bạn."
 
 elif is_completion:
+    event_type = "complete"
     title = "Antigravity: Hoàn thành"
     urgency = "normal"
     if not IS_WINDOWS:
@@ -257,7 +279,6 @@ sys.stdout.flush()
 # 6. Trigger popup asynchronously
 if os.path.exists(MULTI_NOTIFY):
     env = resolve_env()
-    caller_win = get_active_window_id(env)
     cmd = [
         PYTHON3, MULTI_NOTIFY,
         "--app-name=Antigravity",
@@ -265,8 +286,8 @@ if os.path.exists(MULTI_NOTIFY):
         f"--message={message}",
         f"--questions-json={questions_json}",
         f"--urgency={urgency}",
-        f"--window-id={caller_win}",
-        f"--caller-pid={os.getpid()}",
+        f"--event-type={event_type}",
+        f"--caller-pid={os.getppid()}",
         f"--project-hint={project_hint}",
         f"--session-id={conversation_id}",
         f"--timeout={timeout}",

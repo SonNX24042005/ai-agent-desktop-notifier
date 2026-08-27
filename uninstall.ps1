@@ -26,11 +26,20 @@ if claude_path.exists():
     try:
         with open(claude_path, "r", encoding="utf-8") as f:
             cdata = json.load(f)
-        if "hooks" in cdata:
-            del cdata["hooks"]
+        if isinstance(cdata, dict) and "hooks" in cdata and isinstance(cdata["hooks"], dict):
+            hooks = cdata["hooks"]
+            for event in list(hooks.keys()):
+                if isinstance(hooks[event], list):
+                    filtered = [item for item in hooks[event] if "notify-claude.py" not in json.dumps(item) and "notify-input.sh" not in json.dumps(item) and "ai-agent-desktop-notifier" not in json.dumps(item)]
+                    if filtered:
+                        hooks[event] = filtered
+                    else:
+                        del hooks[event]
+            if not hooks:
+                del cdata["hooks"]
             with open(claude_path, "w", encoding="utf-8") as f:
                 json.dump(cdata, f, indent=2)
-            print("- Cleaned Claude Code settings.json")
+            print("- Cleaned ai-agent notifier hooks from Claude Code settings.json (preserved other hooks)")
     except Exception as e:
         print(f"- [WARN] Claude Code error: {e}")
 
@@ -52,11 +61,16 @@ if codex_hooks.exists():
     try:
         with open(codex_hooks, "r", encoding="utf-8") as f:
             data_hooks = json.load(f)
-        if "hooks" in data_hooks and "PermissionRequest" in data_hooks["hooks"]:
-            del data_hooks["hooks"]["PermissionRequest"]
+        if isinstance(data_hooks, dict) and "hooks" in data_hooks and isinstance(data_hooks["hooks"], dict):
+            if "PermissionRequest" in data_hooks["hooks"] and isinstance(data_hooks["hooks"]["PermissionRequest"], list):
+                filtered = [item for item in data_hooks["hooks"]["PermissionRequest"] if "notify.py" not in json.dumps(item)]
+                if filtered:
+                    data_hooks["hooks"]["PermissionRequest"] = filtered
+                else:
+                    del data_hooks["hooks"]["PermissionRequest"]
             with open(codex_hooks, "w", encoding="utf-8") as f:
                 json.dump(data_hooks, f, indent=2)
-            print("- Cleaned Codex hooks.json")
+            print("- Cleaned PermissionRequest from Codex hooks.json")
     except Exception as e:
         print(f"- [WARN] Codex hooks error: {e}")
 
@@ -66,24 +80,33 @@ if gemini_settings_file.exists():
     try:
         with open(gemini_settings_file, "r", encoding="utf-8") as f:
             sdata = json.load(f)
-        if "hooks" in sdata:
-            del sdata["hooks"]
+        if isinstance(sdata, dict) and "hooks" in sdata and isinstance(sdata["hooks"], dict):
+            hooks = sdata["hooks"]
+            for evt in list(hooks.keys()):
+                if isinstance(hooks[evt], list):
+                    filtered = [item for item in hooks[evt] if "notify-antigravity" not in json.dumps(item)]
+                    if filtered:
+                        hooks[evt] = filtered
+                    else:
+                        del hooks[evt]
+            if not hooks:
+                del sdata["hooks"]
             with open(gemini_settings_file, "w", encoding="utf-8") as f:
                 json.dump(sdata, f, indent=2)
-            print("- Cleaned Antigravity settings.json")
+            print("- Cleaned ai-agent notifier hooks from Antigravity settings.json (preserved other hooks)")
     except Exception as e:
         print(f"- [WARN] Antigravity settings error: {e}")
 
 gemini_hooks_file = user_home / ".gemini" / "config" / "hooks.json"
 if gemini_hooks_file.exists():
     try:
-        with open(gemini_hooks_file, "r", encoding="utf-8") as f:
+        with open(gemini_hooks_file, "r") as f:
             gdata = json.load(f)
-        if "desktop-notifier" in gdata:
+        if isinstance(gdata, dict) and "desktop-notifier" in gdata:
             del gdata["desktop-notifier"]
             with open(gemini_hooks_file, "w", encoding="utf-8") as f:
                 json.dump(gdata, f, indent=2)
-            print("- Cleaned Antigravity config/hooks.json")
+            print("- Cleaned desktop-notifier from Antigravity config/hooks.json")
     except Exception as e:
         print(f"- [WARN] Antigravity hooks error: {e}")
 "@
@@ -97,8 +120,10 @@ $FilesToRemove = @(
     (Join-Path $UserHome ".local\bin\anoti"),
     (Join-Path $UserHome ".local\bin\anoti.cmd"),
     (Join-Path $UserHome ".local\bin\anoti.ps1"),
+    (Join-Path $UserHome ".claude\hooks\notify-input.sh"),
     (Join-Path $UserHome ".claude\hooks\notify-claude.py"),
     (Join-Path $UserHome ".codex\notify.py"),
+    (Join-Path $UserHome ".gemini\hooks\notify-antigravity.sh"),
     (Join-Path $UserHome ".gemini\hooks\notify-antigravity.py")
 )
 
@@ -109,7 +134,13 @@ foreach ($f in $FilesToRemove) {
     }
 }
 
-# Clean temp cache files
+# Clean temp cache files and runtime directory
+if ($env:LOCALAPPDATA) {
+    $RuntimeDir = Join-Path $env:LOCALAPPDATA "ai-agent-notifier"
+    if (Test-Path $RuntimeDir) {
+        Remove-Item -Path $RuntimeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 $TempDir = $env:TEMP
 Get-ChildItem -Path $TempDir -Filter "ai_agent_notifier*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 

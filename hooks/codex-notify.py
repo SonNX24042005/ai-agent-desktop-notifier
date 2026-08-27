@@ -71,9 +71,8 @@ def get_active_window_id():
         return ""
 
 
-def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0, session_id=""):
+def send_notification(title, message, urgency="normal", sound_path=None, questions_json="", timeout=0, session_id="", event_type="info"):
     msg = clean_text(message)
-    caller_window = get_active_window_id()
     caller_pid = os.getppid() if hasattr(os, "getppid") else 0
     caller_tty = find_caller_tty(os.getpid())
     terminal_screen = os.environ.get("GNOME_TERMINAL_SCREEN", "")
@@ -88,7 +87,7 @@ def send_notification(title, message, urgency="normal", sound_path=None, questio
                 f"--title={title}",
                 f"--message={msg}",
                 f"--urgency={urgency}",
-                f"--window-id={caller_window}",
+                f"--event-type={event_type}",
                 f"--caller-pid={caller_pid}",
                 f"--project-hint={project_hint}",
                 f"--caller-tty={caller_tty}",
@@ -129,6 +128,7 @@ def handle_completion(payload):
         sound_path=SOUND_COMPLETE,
         timeout=0,
         session_id=session_id,
+        event_type="complete",
     )
 
 
@@ -175,6 +175,7 @@ def handle_hook(payload):
             sound_path=SOUND_WARNING,
             questions_json=q_json,
             session_id=session_id,
+            event_type="permission",
         )
     elif event == "agent-turn-complete":
         handle_completion(payload)

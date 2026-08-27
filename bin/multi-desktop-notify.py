@@ -17,26 +17,64 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32" or os.name == "nt"
 
+import ctypes
+
 if IS_WINDOWS:
-    import ctypes
     from ctypes import wintypes
-    TEMP_DIR = os.environ.get("TEMP") or os.environ.get("TMP") or os.path.expanduser("~\\AppData\\Local\\Temp")
     PYTHON3 = sys.executable or "python"
 else:
-    TEMP_DIR = "/tmp"
     PYTHON3 = sys.executable or "/usr/bin/python3"
 
-PID_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier.pid")
-SESSION_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_sessions.json")
-SESSION_LOCK_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_sessions.lock")
-DEDUPE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_dedupe.json")
-QUEUE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_queue.json")
-QUEUE_LOCK_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_queue.lock")
+
+def get_runtime_dir():
+    """Returns a secure, user-private runtime directory for PID, state, and lock files.
+    On Linux: Prefers $AI_AGENT_NOTIFIER_RUNTIME_DIR, then $XDG_RUNTIME_DIR/ai-agent-notifier,
+    falling back to /tmp/ai-agent-notifier-<uid> with 0700 permissions.
+    On Windows: Uses $LOCALAPPDATA/ai-agent-notifier/runtime or user temp directory.
+    """
+    env_override = os.environ.get("AI_AGENT_NOTIFIER_RUNTIME_DIR")
+    if env_override:
+        os.makedirs(env_override, mode=0o700, exist_ok=True)
+        return env_override
+
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or os.path.expanduser("~\\AppData\\Local")
+        runtime_dir = os.path.join(base, "ai-agent-notifier", "runtime")
+    else:
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg_runtime and os.path.isdir(xdg_runtime):
+            runtime_dir = os.path.join(xdg_runtime, "ai-agent-notifier")
+        else:
+            uid = os.getuid() if hasattr(os, "getuid") else 1000
+            runtime_dir = os.path.join(tempfile.gettempdir(), f"ai-agent-notifier-{uid}")
+
+    try:
+        os.makedirs(runtime_dir, mode=0o700, exist_ok=True)
+        if not IS_WINDOWS and os.path.exists(runtime_dir):
+            try:
+                os.chmod(runtime_dir, 0o700)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return runtime_dir
+
+
+RUNTIME_DIR = get_runtime_dir()
+TEMP_DIR = RUNTIME_DIR
+PID_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier.pid")
+SESSION_CACHE_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_sessions.json")
+SESSION_LOCK_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_sessions.lock")
+DEDUPE_CACHE_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_dedupe.json")
+DEDUPE_LOCK_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_dedupe.lock")
+QUEUE_CACHE_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_queue.json")
+QUEUE_LOCK_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_queue.lock")
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
 FOCUS_MAX_ENTRIES = 64
 FOCUS_MAX_AGE = 86400  # 24 hours
@@ -151,6 +189,14 @@ if IS_WINDOWS:
         except Exception:
             pass
         return monitors
+else:
+    def get_windows_process_tree():
+        """POSIX fallback for get_windows_process_tree."""
+        return {}
+
+    def get_windows_monitors():
+        """POSIX fallback for get_windows_monitors."""
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +267,10 @@ def file_lock(lock_path, timeout=1.0):
         else:
             import fcntl
             try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+                flags = os.O_CREAT | os.O_RDWR
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(lock_path, flags, 0o600)
                 while time.monotonic() - start_time < timeout:
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -253,7 +302,11 @@ def atomic_write_json(file_path, data):
     """Atomically writes dictionary/list data to a JSON file via a temporary file and rename."""
     tmp_path = f"{file_path}.tmp.{os.getpid()}_{int(time.time()*1000)}"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -284,6 +337,24 @@ def safe_load_json(file_path, default=None):
         return default
 
 
+def normalize_title(title):
+    """Normalizes window title by stripping leading non-alphanumeric icons/spinners and whitespace."""
+    if not title:
+        return ""
+    s = str(title).strip().lower()
+    s = re.sub(r"^[^\w\s]+", "", s).strip()
+    return " ".join(s.split())
+
+
+def titles_compatible(expected, current):
+    """Checks if expected title fingerprint matches current window title."""
+    exp = normalize_title(expected)
+    cur = normalize_title(current)
+    if not exp or not cur:
+        return True
+    return exp == cur or exp in cur or cur in exp
+
+
 def prune_sessions(sessions, now=None, max_entries=FOCUS_MAX_ENTRIES, max_age=FOCUS_MAX_AGE):
     """Prunes expired sessions (>24h) and caps total count to max_entries (keeps newest)."""
     if now is None:
@@ -294,7 +365,7 @@ def prune_sessions(sessions, now=None, max_entries=FOCUS_MAX_ENTRIES, max_age=FO
             if now - entry.get("updated_at", 0) < max_age:
                 valid[str(sid)] = entry
         elif isinstance(entry, str) and entry.strip():
-            valid[str(sid)] = {"window_id": entry.strip(), "updated_at": now, "precision": "window"}
+            valid[str(sid)] = {"window_id": entry.strip(), "updated_at": now, "precision": "window", "schema_version": 2}
 
     if len(valid) <= max_entries:
         return valid
@@ -305,7 +376,7 @@ def prune_sessions(sessions, now=None, max_entries=FOCUS_MAX_ENTRIES, max_age=FO
 
 
 # ---------------------------------------------------------------------------
-# Session Cache & Window Identity Store
+# Session Cache & Window Identity Store (Schema v2)
 # ---------------------------------------------------------------------------
 def save_session_window(session_id, window_id, project_hint="", pid=0, precision="window", app_hint="", title_fingerprint=""):
     """Caches target window identity for a session ID with lock, atomic write, and cache protection."""
@@ -314,6 +385,16 @@ def save_session_window(session_id, window_id, project_hint="", pid=0, precision
     wid_str = str(window_id).strip()
     if not is_developer_window(wid_str):
         return False
+
+    c_pid = int(pid or 0)
+    if c_pid > 1:
+        wpid = get_window_pid(wid_str)
+        if wpid > 1 and not is_pid_in_ancestry(wpid, c_pid) and not is_developer_window(wid_str):
+            return False
+
+    fingerprint = str(title_fingerprint or "").strip()
+    if not fingerprint:
+        fingerprint = normalize_title(find_window_title(wid_str))
 
     with file_lock(SESSION_LOCK_FILE, timeout=1.0):
         sessions = safe_load_json(SESSION_CACHE_FILE, default={})
@@ -324,14 +405,27 @@ def save_session_window(session_id, window_id, project_hint="", pid=0, precision
             if existing_prec == "window" and precision not in ("window", "authoritative"):
                 return False
 
+        dec_wid = wid_str
+        try:
+            if wid_str.startswith(("0x", "0X")):
+                dec_wid = str(int(wid_str, 16))
+            elif wid_str.isdigit():
+                dec_wid = str(int(wid_str))
+        except Exception:
+            pass
+
         sessions[str(session_id)] = {
+            "schema_version": 2,
+            "session_id": str(session_id),
             "window_id": wid_str,
+            "window_id_dec": dec_wid,
             "project_hint": str(project_hint or "").strip(),
-            "pid": int(pid or 0),
+            "pid": c_pid,
             "app_hint": str(app_hint or "").strip(),
-            "title_fingerprint": str(title_fingerprint or "").strip(),
+            "title_fingerprint": fingerprint,
             "precision": precision,
             "backend": "windows" if IS_WINDOWS else "x11",
+            "captured_at": time.time(),
             "updated_at": time.time(),
         }
         sessions = prune_sessions(sessions)
@@ -348,14 +442,14 @@ def get_session_window_info(session_id):
         if isinstance(entry, dict):
             return entry
         elif isinstance(entry, str) and entry.strip():
-            return {"window_id": entry.strip(), "precision": "window"}
+            return {"window_id": entry.strip(), "precision": "window", "schema_version": 2}
     return None
 
 
 def get_session_window(session_id):
     """Retrieves and validates cached window ID for a session.
 
-    Performs stale handle and fingerprint validation to avoid misfocusing
+    Performs stale handle, PID reuse, and fingerprint validation to avoid misfocusing
     reused or closed window IDs.
     """
     info = get_session_window_info(session_id)
@@ -367,7 +461,7 @@ def get_session_window(session_id):
     if not is_developer_window(wid):
         return ""
 
-    # Stale handle / fingerprint verification:
+    # Stale handle / PID verification
     cached_pid = int(info.get("pid", 0))
     if cached_pid > 0:
         cur_pid = get_window_pid(wid)
@@ -375,148 +469,192 @@ def get_session_window(session_id):
             # PID mismatch: window ID reused by OS for another process
             return ""
 
+    # Title fingerprint verification
+    cached_fingerprint = info.get("title_fingerprint", "")
+    if cached_fingerprint:
+        cur_title = find_window_title(wid)
+        if cur_title and not titles_compatible(cached_fingerprint, cur_title):
+            return ""
+
     cached_hint = (info.get("project_hint") or "").strip().lower()
     if cached_hint:
         title = find_window_title(wid)
-        if title and cached_hint not in title and not is_developer_window(wid):
+        if title and cached_hint not in title.lower():
             return ""
 
     return wid
 
 
 def is_duplicate_notification(app_name, title, message, dedupe_seconds=2):
-    """Checks and sets deduplication state to prevent notification spam."""
+    """Checks and sets deduplication state to prevent notification spam with process-safe lock."""
     if dedupe_seconds <= 0:
         return False
     import hashlib
     key_raw = f"{app_name}|{title}|{message}"
     key = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
     now = time.time()
-    dedupe_data = {}
-    if os.path.exists(DEDUPE_CACHE_FILE):
-        try:
-            with open(DEDUPE_CACHE_FILE, "r") as f:
-                dedupe_data = json.load(f)
-        except Exception:
-            dedupe_data = {}
-    # Prune expired keys (older than 60s)
-    dedupe_data = {k: v for k, v in dedupe_data.items() if now - v < 60}
-    last_time = dedupe_data.get(key, 0)
-    if now - last_time < dedupe_seconds:
-        return True
-    dedupe_data[key] = now
-    try:
-        with open(DEDUPE_CACHE_FILE, "w") as f:
-            json.dump(dedupe_data, f)
-    except Exception:
-        pass
-    return False
+    with file_lock(DEDUPE_LOCK_FILE, timeout=1.0):
+        dedupe_data = safe_load_json(DEDUPE_CACHE_FILE, default={})
+        # Prune expired keys (older than 60s)
+        dedupe_data = {k: v for k, v in dedupe_data.items() if isinstance(v, (int, float)) and now - v < 60}
+        last_time = dedupe_data.get(key, 0)
+        if now - last_time < dedupe_seconds:
+            return True
+        dedupe_data[key] = now
+        atomic_write_json(DEDUPE_CACHE_FILE, dedupe_data)
+        return False
 
 
 def load_notification_queue():
     """Loads all pending notifications currently waiting in queue."""
     if not os.path.exists(QUEUE_CACHE_FILE):
         return {}
-    try:
-        with open(QUEUE_CACHE_FILE, "r") as f:
-            queue = json.load(f)
+    with file_lock(QUEUE_LOCK_FILE, timeout=1.0):
+        queue = safe_load_json(QUEUE_CACHE_FILE, default={})
         now = time.time()
         # Discard expired notifications older than 4 hours
         active_queue = {k: v for k, v in queue.items() if isinstance(v, dict) and now - v.get("created_at", 0) < 14400}
         return active_queue
-    except Exception:
-        return {}
+
+
+def get_next_generation():
+    """Generates a strictly increasing generation ID for notifications."""
+    gen_file = os.path.join(RUNTIME_DIR, "ai_agent_notifier_generation.txt")
+    lock_file = os.path.join(RUNTIME_DIR, "ai_agent_notifier_generation.lock")
+    with file_lock(lock_file, timeout=1.0):
+        try:
+            if os.path.exists(gen_file):
+                with open(gen_file, "r") as f:
+                    val = int(f.read().strip() or "0")
+            else:
+                val = 0
+        except Exception:
+            val = 0
+        val += 1
+        try:
+            with open(gen_file, "w") as f:
+                f.write(str(val))
+        except Exception:
+            pass
+        return val
 
 
 def save_to_queue(key, notif_item):
-    """Saves or updates a pending notification item in the persistent queue."""
+    """Saves or updates a pending notification item in the persistent queue atomically, coalescing duplicates."""
     if not key or not notif_item:
         return
-    queue = load_notification_queue()
-    queue[key] = notif_item
-    try:
-        with open(QUEUE_CACHE_FILE, "w") as f:
-            json.dump(queue, f)
-    except Exception:
-        pass
+    with file_lock(QUEUE_LOCK_FILE, timeout=1.5):
+        queue = safe_load_json(QUEUE_CACHE_FILE, default={})
+        now = time.time()
+        active_queue = {}
+        target_sess = notif_item.get("session_id")
+        for k, v in queue.items():
+            if isinstance(v, dict) and now - v.get("created_at", 0) < 1800:
+                # If existing entry is for the same session and not this key, supersede it
+                if target_sess and v.get("session_id") == target_sess and k != key:
+                    continue
+                active_queue[k] = v
+
+        if "generation" not in notif_item:
+            notif_item["generation"] = get_next_generation()
+        if "status" not in notif_item:
+            notif_item["status"] = "queued"
+
+        active_queue[key] = notif_item
+        atomic_write_json(QUEUE_CACHE_FILE, active_queue)
 
 
 def remove_from_queue(key):
-    """Removes a resolved notification from the persistent queue."""
+    """Removes a resolved notification from the persistent queue atomically."""
     if not key:
         return
-    queue = load_notification_queue()
-    if key in queue:
-        del queue[key]
-        try:
-            with open(QUEUE_CACHE_FILE, "w") as f:
-                json.dump(queue, f)
-        except Exception:
-            pass
+    with file_lock(QUEUE_LOCK_FILE, timeout=1.5):
+        queue = safe_load_json(QUEUE_CACHE_FILE, default={})
+        if key in queue:
+            del queue[key]
+            atomic_write_json(QUEUE_CACHE_FILE, queue)
+
+
+def mark_queue_item_dismissed(key):
+    """Marks a notification as dismissed from screen so it is not re-popped automatically, but remains accessible for focus."""
+    if not key:
+        return
+    with file_lock(QUEUE_LOCK_FILE, timeout=1.5):
+        queue = safe_load_json(QUEUE_CACHE_FILE, default={})
+        if key in queue and isinstance(queue[key], dict):
+            queue[key]["dismissed"] = True
+            atomic_write_json(QUEUE_CACHE_FILE, queue)
 
 
 def pop_next_notification_async(exclude_key=""):
     """Pops and launches the next pending notification from the queue if any exist."""
-    queue = load_notification_queue()
-    if exclude_key and exclude_key in queue:
-        del queue[exclude_key]
+    with file_lock(QUEUE_LOCK_FILE, timeout=1.5):
+        queue = safe_load_json(QUEUE_CACHE_FILE, default={})
+        if exclude_key and exclude_key in queue:
+            del queue[exclude_key]
 
-    if not queue:
-        return
+        now = time.time()
+        pending = []
+        for k, v in list(queue.items()):
+            if isinstance(v, dict) and now - v.get("created_at", 0) < 1800:
+                if not v.get("dismissed", False) and k != exclude_key:
+                    pending.append((v.get("created_at", 0), k, v))
+        pending.sort(key=lambda x: x[0])
 
-    pending = []
-    for k, v in queue.items():
-        if isinstance(v, dict):
-            pending.append((v.get("created_at", 0), k, v))
-    pending.sort(key=lambda x: x[0])
+        if not pending:
+            atomic_write_json(QUEUE_CACHE_FILE, queue)
+            return
 
-    if not pending:
-        return
+        _, next_key, item = pending[0]
+        # Atomically consume the popped item from queue to prevent looping
+        del queue[next_key]
+        atomic_write_json(QUEUE_CACHE_FILE, queue)
 
-    _, next_key, item = pending[0]
-    app_name = item.get("app_name", "AI Agent")
-    title = item.get("title", "Thông báo")
-    message = item.get("message", "")
-    questions_json = item.get("questions_json", "")
-    urgency = item.get("urgency", "normal")
-    sound = item.get("sound", "")
-    target_wid = item.get("target_window_id", "")
-    caller_pid = item.get("caller_pid", 0)
-    project_hint = item.get("project_hint", "")
-    session_id = item.get("session_id", "")
-    timeout = item.get("timeout", 0)
+        app_name = item.get("app_name", "AI Agent")
+        title = item.get("title", "Thông báo")
+        message = item.get("message", "")
+        questions_json = item.get("questions_json", "")
+        urgency = item.get("urgency", "normal")
+        event_type = item.get("event_type", "info")
+        sound = item.get("sound", "")
+        target_wid = item.get("target_window_id", "")
+        caller_pid = item.get("caller_pid", 0)
+        project_hint = item.get("project_hint", "")
+        session_id = item.get("session_id", "")
+        timeout = item.get("timeout", 0)
 
-    cmd = [
-        PYTHON3,
-        __file__,
-        f"--app-name={app_name}",
-        f"--title={title}",
-        f"--message={message}",
-        f"--urgency={urgency}",
-        f"--window-id={target_wid}",
-        f"--caller-pid={caller_pid}",
-        f"--project-hint={project_hint}",
-        f"--session-id={session_id}",
-        f"--timeout={timeout}",
-        "--from-queue",
-    ]
-    if sound:
-        cmd.append(f"--sound={sound}")
-    if questions_json:
-        cmd.append(f"--questions-json={questions_json}")
+        cmd = [
+            PYTHON3,
+            __file__,
+            f"--app-name={app_name}",
+            f"--title={title}",
+            f"--message={message}",
+            f"--urgency={urgency}",
+            f"--event-type={event_type}",
+            f"--window-id={target_wid}",
+            f"--caller-pid={caller_pid}",
+            f"--project-hint={project_hint}",
+            f"--session-id={session_id}",
+            f"--timeout={timeout}",
+            "--from-queue",
+        ]
+        if sound:
+            cmd.append(f"--sound={sound}")
+        if questions_json:
+            cmd.append(f"--questions-json={questions_json}")
 
-    try:
-        creationflags = 0x08000000 if IS_WINDOWS else 0
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            creationflags=creationflags,
-        )
-    except Exception:
-        pass
+        try:
+            creationflags = 0x08000000 if IS_WINDOWS else 0
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                creationflags=creationflags,
+            )
+        except Exception:
+            pass
 
 
 def dispatch_webhooks_async(app_name, title, message):
@@ -568,26 +706,37 @@ def dispatch_webhooks_async(app_name, title, message):
 
 
 def kill_previous_instance():
-    """Ensure new notification replaces any active popup to prevent stacking."""
+    """Ensure new notification replaces any active popup to prevent stacking, verifying process identity."""
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE, "r") as f:
-                old_pid = int(f.read().strip())
+                content = f.read().strip()
+                old_pid = int(content) if content.isdigit() else 0
             if old_pid != os.getpid() and old_pid > 1:
                 try:
                     if IS_WINDOWS:
-                        os.kill(old_pid, signal.SIGTERM)
+                        tree = get_windows_process_tree()
+                        if old_pid in tree:
+                            exe_name = tree[old_pid][1].lower()
+                            if "python" in exe_name:
+                                os.kill(old_pid, signal.SIGTERM)
                     else:
-                        with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
-                            cmdline = cf.read().decode(errors="ignore")
-                        if "multi-desktop-notify" in cmdline:
-                            os.kill(old_pid, signal.SIGTERM)
+                        cmdline_path = f"/proc/{old_pid}/cmdline"
+                        if os.path.exists(cmdline_path):
+                            with open(cmdline_path, "rb") as cf:
+                                cmdline = cf.read().decode(errors="ignore")
+                            if "multi-desktop-notify" in cmdline:
+                                os.kill(old_pid, signal.SIGTERM)
                 except OSError:
                     pass
         except Exception:
             pass
     try:
-        with open(PID_FILE, "w") as f:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(PID_FILE, flags, 0o600)
+        with open(fd, "w") as f:
             f.write(str(os.getpid()))
     except Exception:
         pass
@@ -772,7 +921,13 @@ def get_process_ancestors(pid):
         ancestors.add(curr)
         try:
             with open(f"/proc/{curr}/stat", "r") as f:
-                curr = int(f.read().split()[3])
+                content = f.read()
+                comm_end = content.rfind(")")
+                if comm_end != -1:
+                    rest = content[comm_end + 1:].split()
+                    curr = int(rest[1])
+                else:
+                    break
         except Exception:
             break
     return ancestors
@@ -1098,37 +1253,120 @@ def get_current_active_window():
             return wid
     except Exception:
         pass
+
+    try:
+        out = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL).decode()
+        if "_NET_ACTIVE_WINDOW(WINDOW)" in out and "#" in out:
+            hex_val = out.split("#")[-1].strip().split()[0]
+            if hex_val.startswith("0x") and hex_val != "0x0":
+                return str(int(hex_val, 16))
+    except Exception:
+        pass
+
     return ""
+
+
+def find_controlling_tty(start_pid):
+    """Finds the controlling /dev/pts/* device by traversing the process ancestor chain on Linux."""
+    if IS_WINDOWS or not start_pid or int(start_pid) <= 1:
+        return None
+    pid = int(start_pid)
+    seen = set()
+    while pid > 1 and pid not in seen and len(seen) < 15:
+        seen.add(pid)
+        try:
+            for fd_num in (0, 1, 2):
+                fd_path = f"/proc/{pid}/fd/{fd_num}"
+                if os.path.exists(fd_path):
+                    target = os.path.realpath(fd_path)
+                    if target.startswith("/dev/pts/"):
+                        return target
+
+            with open(f"/proc/{pid}/stat", "r") as f:
+                content = f.read()
+                comm_end = content.rfind(")")
+                if comm_end != -1:
+                    rest = content[comm_end + 1:].split()
+                    pid = int(rest[1])  # ppid
+                else:
+                    break
+        except Exception:
+            break
+    return None
+
+
+def is_pid_in_foreground(pid):
+    """Checks if a Linux process is in the foreground process group of its controlling terminal."""
+    if IS_WINDOWS or not pid or int(pid) <= 1:
+        return False
+    try:
+        with open(f"/proc/{int(pid)}/stat", "r") as f:
+            content = f.read()
+            comm_end = content.rfind(")")
+            if comm_end != -1:
+                fields = content[comm_end + 1:].split()
+                pgrp = int(fields[2])
+                tpgid = int(fields[5])
+                return pgrp > 0 and pgrp == tpgid
+    except Exception:
+        pass
+    return False
 
 
 def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id=""):
     """Checks if active_wid corresponds to the target application window that triggered the notification."""
-    if not active_wid or not str(active_wid).strip().isdigit():
-        return False
-    active_wid_str = str(active_wid).strip()
+    # 1. Direct match with active_wid if active_wid is available (X11 / Windows)
+    if active_wid:
+        def to_dec_str(val):
+            s = str(val or "").strip()
+            if not s:
+                return ""
+            try:
+                if s.startswith(("0x", "0X")):
+                    return str(int(s, 16))
+                if s.isdigit():
+                    return str(int(s))
+            except Exception:
+                pass
+            return s
 
-    # 1. Direct match with target_wid
-    if target_wid and str(target_wid).strip().isdigit():
-        if active_wid_str == str(target_wid).strip():
+        active_wid_str = to_dec_str(active_wid)
+        target_wid_str = to_dec_str(target_wid)
+
+        if target_wid_str and active_wid_str and active_wid_str == target_wid_str:
             return True
 
-    # 2. Match with cached session window
-    if session_id:
-        cached_wid = get_session_window(session_id)
-        if cached_wid and str(cached_wid).strip() == active_wid_str:
-            return True
-
-    # 3. Match PID tree
-    c_pid = int(caller_pid or 0)
-    if c_pid > 1:
-        wpid = get_window_pid(active_wid_str)
-        if wpid > 1 and is_pid_in_ancestry(wpid, c_pid):
-            if project_hint:
-                title = find_window_title(active_wid_str)
-                if project_hint in title or is_developer_window(active_wid_str):
-                    return True
-            else:
+        if session_id:
+            cached_wid = to_dec_str(get_session_window(session_id))
+            if cached_wid and cached_wid == active_wid_str:
                 return True
+
+        c_pid = int(caller_pid or 0)
+        if c_pid > 1 and active_wid_str:
+            wpid = get_window_pid(active_wid_str)
+            if wpid > 1 and is_pid_in_ancestry(wpid, c_pid):
+                if project_hint:
+                    title = find_window_title(active_wid_str)
+                    if project_hint.lower() in title.lower() or is_developer_window(active_wid_str):
+                        return True
+                else:
+                    if is_developer_window(active_wid_str):
+                        return True
+
+    # 2. Wayland native fallback: when active_wid cannot be polled from Wayland compositor
+    if not IS_WINDOWS and caller_pid and int(caller_pid) > 1:
+        c_pid = int(caller_pid)
+        tty_dev = find_controlling_tty(c_pid)
+        if tty_dev and os.path.exists(tty_dev):
+            try:
+                st = os.stat(tty_dev)
+                now = time.time()
+                # Check if terminal was active recently (within 30s) AND process is in foreground
+                if (now - st.st_atime <= 30.0) or (now - st.st_mtime <= 30.0):
+                    if is_pid_in_foreground(c_pid):
+                        return True
+            except Exception:
+                pass
 
     return False
 
@@ -1249,6 +1487,11 @@ def focus_target_window(window_id, verify_timeout=0.4):
                 attached_cur = bool(user32.AttachThreadInput(cur_thread, target_thread, True))
 
             user32.BringWindowToTop(hwnd)
+            if hasattr(user32, "SwitchToThisWindow"):
+                try:
+                    user32.SwitchToThisWindow(hwnd, True)
+                except Exception:
+                    pass
             user32.SetForegroundWindow(hwnd)
             user32.SetActiveWindow(hwnd)
 
@@ -1418,28 +1661,33 @@ def extract_summary_from_payload(questions_json_raw, fallback_message):
 
 
 def is_boilerplate_message(text, tag_class):
-    """Checks if message is redundant boilerplate that should be hidden in compact mode."""
+    """Checks if message is redundant boilerplate that should be hidden in compact mode.
+    Only hides strictly short standard boilerplate phrases, preserving informative summaries.
+    """
     if not text or not str(text).strip():
         return True
-    cleaned = str(text).strip().lower()
+    cleaned = " ".join(str(text).strip().lower().split())
 
-    if tag_class == "tag-complete":
-        if any(k in cleaned for k in ["hoàn thành", "complete", "finish", "done", "thành công"]):
-            return True
+    boilerplate_phrases = {
+        "đã hoàn thành", "hoàn thành", "hoàn thành trả lời", "đã hoàn thành trả lời",
+        "hoàn thành công việc", "đã hoàn thành công việc", "hoàn thành nhiệm vụ",
+        "đã hoàn thành nhiệm vụ", "hoàn thành lượt làm việc", "đã hoàn thành lượt làm việc",
+        "completed", "finished", "đang chờ bạn", "đang chờ bạn tương tác", "đang đặt câu hỏi cho bạn",
+        "cần bạn chú ý", "ai agent đang chờ", "claude đã hoàn thành trả lời",
+        "claude code đang chờ bạn", "antigravity đã hoàn thành trả lời",
+        "antigravity đang chờ bạn", "codex cần bạn chú ý", "done", "success"
+    }
 
-    boilerplate_phrases = [
-        "đã hoàn thành", "hoàn thành trả lời", "hoàn thành công việc", "hoàn thành nhiệm vụ",
-        "hoàn thành lượt làm việc", "completed", "finished", "đang chờ bạn",
-        "đang chờ bạn tương tác", "đang đặt câu hỏi cho bạn", "cần bạn chú ý", "ai agent đang chờ",
-    ]
+    # Clean punctuation for exact match check
+    stripped = cleaned.strip(".!?:; ")
+    if stripped in boilerplate_phrases:
+        return True
 
-    for phrase in boilerplate_phrases:
-        if cleaned == phrase:
-            return True
-        if cleaned.startswith(phrase) or cleaned.endswith(phrase):
-            words = [w for w in cleaned.replace(".", "").replace("!", "").split() if w not in ["antigravity", "claude", "codex", "gemini", "agent", "ai"]]
-            if not words or " ".join(words) in boilerplate_phrases or any(" ".join(words).startswith(p) for p in boilerplate_phrases):
-                return True
+    # If the text has significant length or informative content beyond boilerplate, keep it
+    words = [w for w in stripped.split() if w not in ["antigravity", "claude", "codex", "gemini", "agent", "ai", "code"]]
+    cleaned_words = " ".join(words)
+    if cleaned_words in boilerplate_phrases:
+        return True
 
     return False
 
@@ -1447,7 +1695,7 @@ def is_boilerplate_message(text, tag_class):
 # ---------------------------------------------------------------------------
 # Windows Multi-Monitor Overlay (Tkinter + Windows Toast)
 # ---------------------------------------------------------------------------
-def show_multi_monitor_popup_windows(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+def show_multi_monitor_popup_windows(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5, event_type=""):
     """Renders dark-themed notification overlay across connected displays on Windows."""
     display_text = extract_summary_from_payload(questions_json, message)
 
@@ -1483,15 +1731,19 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
     cat_lower = category_text.lower()
     cat_color = "#38bdf8"
     tag_class = "tag-info"
-    if any(k in cat_lower for k in ["hỏi", "question", "ask", "input"]):
+
+    if event_type == "question" or any(k in cat_lower for k in ["hỏi", "question", "ask", "input"]):
+        category_text = "CÂU HỎI" if event_type == "question" else category_text
         cat_color = "#fbbf24"
         border_color = "#fbbf24"
         tag_class = "tag-question"
-    elif any(k in cat_lower for k in ["quyền", "permission", "grant", "exec", "run", "critical"]):
+    elif event_type == "permission" or any(k in cat_lower for k in ["quyền", "permission", "grant", "exec", "run", "critical"]):
+        category_text = "CẤP QUYỀN" if event_type == "permission" else category_text
         cat_color = "#f43f5e"
         border_color = "#f43f5e"
         tag_class = "tag-permission"
-    elif any(k in cat_lower for k in ["thành", "complete", "finish", "done", "success"]):
+    elif event_type == "complete" or any(k in cat_lower for k in ["thành", "complete", "finish", "done", "success"]):
+        category_text = "HOÀN THÀNH" if event_type == "complete" else category_text
         cat_color = "#34d399"
         border_color = "#34d399"
         tag_class = "tag-complete"
@@ -1608,7 +1860,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
 
         btn_focus = tk.Button(
             btn_frame,
-            text="Đến cửa sổ [Alt+Q]",
+            text="Đến cửa sổ (Alt+Q)",
             bg="#2563eb",
             fg="#ffffff",
             activebackground="#1d4ed8",
@@ -1624,7 +1876,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
 
         btn_close = tk.Button(
             btn_frame,
-            text="✕ Đóng [Esc]",
+            text="✕ Đóng",
             bg="#3f3f46",
             fg="#e4e4e7",
             activebackground="#52525b",
@@ -1666,7 +1918,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                     session_id=session_id,
                 )
             active_wid = get_current_active_window()
-            if active_wid and is_target_window_active(
+            if is_target_window_active(
                 active_wid,
                 target_wid=target_window_id,
                 caller_pid=caller_pid,
@@ -1682,12 +1934,12 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
             else:
                 active_since[0] = None
 
-            root.after(250, check_active_timer)
+            root.after(100, check_active_timer)
 
-        root.after(250, check_active_timer)
+        root.after(100, check_active_timer)
 
-    if timeout > 0:
-        root.after(int(timeout * 1000), handle_close_only)
+    effective_timeout = timeout if timeout > 0 else 15
+    root.after(int(effective_timeout * 1000), handle_close_only)
 
     root.mainloop()
 
@@ -1762,7 +2014,7 @@ def get_target_monitor_indices(n_monitors, can_place_windows):
 # ---------------------------------------------------------------------------
 # Linux Multi-Monitor Overlay (GTK3 / GDK)
 # ---------------------------------------------------------------------------
-def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5, event_type=""):
     """Renders dark-themed notification overlay across connected displays on Linux via GTK3."""
     display_text = extract_summary_from_payload(questions_json, message)
 
@@ -2031,11 +2283,14 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
 
             tag_class = "tag-info"
             cat_lower = category_text.lower()
-            if any(k in cat_lower for k in ["hỏi", "question", "ask", "input"]):
+            if event_type == "question" or any(k in cat_lower for k in ["hỏi", "question", "ask", "input"]):
+                category_text = "CÂU HỎI" if event_type == "question" else category_text
                 tag_class = "tag-question"
-            elif any(k in cat_lower for k in ["quyền", "permission", "grant", "exec", "run", "critical"]):
+            elif event_type == "permission" or any(k in cat_lower for k in ["quyền", "permission", "grant", "exec", "run", "critical"]):
+                category_text = "CẤP QUYỀN" if event_type == "permission" else category_text
                 tag_class = "tag-permission"
-            elif any(k in cat_lower for k in ["thành", "complete", "finish", "done", "success"]):
+            elif event_type == "complete" or any(k in cat_lower for k in ["thành", "complete", "finish", "done", "success"]):
+                category_text = "HOÀN THÀNH" if event_type == "complete" else category_text
                 tag_class = "tag-complete"
 
             lbl_cat = Gtk.Label(label=f"•  {category_text}")
@@ -2068,11 +2323,11 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
             btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             btn_box.set_margin_top(4)
 
-            btn_focus = Gtk.Button(label="Đến cửa sổ [Alt+Q]")
+            btn_focus = Gtk.Button(label="Đến cửa sổ (Alt+Q)")
             btn_focus.get_style_context().add_class("focus-btn")
             btn_focus.connect("clicked", lambda b: handle_focus_and_close())
 
-            btn_close = Gtk.Button(label="✕ Đóng [Esc]")
+            btn_close = Gtk.Button(label="✕ Đóng")
             btn_close.get_style_context().add_class("close-btn")
             btn_close.connect("clicked", lambda b: handle_close_only())
 
@@ -2126,7 +2381,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     )
 
                 active_wid = get_current_active_window()
-                if active_wid and is_target_window_active(
+                if is_target_window_active(
                     active_wid,
                     target_wid=target_window_id,
                     caller_pid=caller_pid,
@@ -2137,6 +2392,8 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     if active_since[0] is None:
                         active_since[0] = now
                     elif (now - active_since[0]) >= auto_dismiss_delay:
+                        if queue_key:
+                            remove_from_queue(queue_key)
                         handle_close_only()
                         return False
                 else:
@@ -2144,17 +2401,17 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
 
                 return True
 
-            GLib.timeout_add(250, check_target_window_active_timer)
+            GLib.timeout_add(100, check_target_window_active_timer)
 
-        if timeout > 0:
-            GLib.timeout_add_seconds(timeout, handle_close_only)
+        effective_timeout = timeout if timeout > 0 else 15
+        GLib.timeout_add_seconds(effective_timeout, handle_close_only)
 
         Gtk.main()
     except Exception:
         send_fallback_notify(app_name, title, display_text, urgency="normal", timeout=timeout)
 
 
-def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5):
+def show_multi_monitor_popup(app_name, title, message, questions_json="", target_window_id="", timeout=0, caller_pid=0, project_hint="", session_id="", queue_key="", auto_dismiss_delay=1.5, event_type=""):
     """Platform dispatcher for multi-monitor popup."""
     if IS_WINDOWS:
         show_multi_monitor_popup_windows(
@@ -2167,6 +2424,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             session_id=session_id,
             queue_key=queue_key,
             auto_dismiss_delay=auto_dismiss_delay,
+            event_type=event_type,
         )
     else:
         show_multi_monitor_popup_linux(
@@ -2179,6 +2437,7 @@ def show_multi_monitor_popup(app_name, title, message, questions_json="", target
             session_id=session_id,
             queue_key=queue_key,
             auto_dismiss_delay=auto_dismiss_delay,
+            event_type=event_type,
         )
 
 
@@ -2192,6 +2451,7 @@ def main():
     parser.add_argument("--message", default="")
     parser.add_argument("--questions-json", default="")
     parser.add_argument("--urgency", choices=["low", "normal", "critical"], default="normal")
+    parser.add_argument("--event-type", choices=["question", "permission", "complete", "info", ""], default="", help="Explicit notification event type.")
     parser.add_argument("--sound", default="")
     parser.add_argument("--timeout", type=int, default=0)
     parser.add_argument("--window-id", default="")
@@ -2208,8 +2468,21 @@ def main():
     parser.add_argument("--update", "-u", "--upgrade", action="store_true", default=False, help="Update notification system to latest version.")
     parser.add_argument("--uninstall", action="store_true", default=False, help="Uninstall notification system and restore backups.")
     parser.add_argument("--install", action="store_true", default=False, help="Install notification system into current user profile.")
+    parser.add_argument("--dismiss", action="store_true", default=False, help="Dismiss active popup and remove from queue.")
 
     args, _ = parser.parse_known_args()
+
+    # 0. Dismiss active notification
+    if args.dismiss:
+        kill_previous_instance()
+        queue_key = get_queue_key(
+            session_id=args.session_id,
+            window_id=args.window_id,
+            caller_pid=args.caller_pid,
+            project_hint=args.project_hint,
+        )
+        remove_from_queue(queue_key)
+        return
 
     # 0. Global focus command
     if args.focus:
@@ -2218,41 +2491,53 @@ def main():
     # 0. Lifecycle management flags
     if args.update:
         print("[INFO] Dang cap nhat AI Agent Desktop Notifier...")
+        script_dir = Path(__file__).resolve().parent.parent
         if IS_WINDOWS:
-            script_dir = Path(__file__).resolve().parent.parent
             local_update = script_dir / "update.ps1"
             if local_update.exists():
                 subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_update)], check=False)
             else:
-                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.ps1 | iex"], check=False)
+                print("[ERROR] Khong tim thay update.ps1 cuc bo. Vui long cap nhat qua release chinh thuc.")
         else:
-            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash"], check=False)
+            local_update = script_dir / "update.sh"
+            if local_update.exists():
+                subprocess.run(["bash", str(local_update)], check=False)
+            else:
+                print("[ERROR] Khong tim thay update.sh cuc bo. Vui long cap nhat qua release chinh thuc.")
         return
 
     if args.uninstall:
         print("[INFO] Dang go cai dat AI Agent Desktop Notifier...")
+        script_dir = Path(__file__).resolve().parent.parent
         if IS_WINDOWS:
-            script_dir = Path(__file__).resolve().parent.parent
             local_uninstall = script_dir / "uninstall.ps1"
             if local_uninstall.exists():
                 subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_uninstall)], check=False)
             else:
-                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.ps1 | iex"], check=False)
+                print("[ERROR] Khong tim thay uninstall.ps1 cuc bo. Vui long go cai dat thu cong.")
         else:
-            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash"], check=False)
+            local_uninstall = script_dir / "uninstall.sh"
+            if local_uninstall.exists():
+                subprocess.run(["bash", str(local_uninstall)], check=False)
+            else:
+                print("[ERROR] Khong tim thay uninstall.sh cuc bo. Vui long go cai dat thu cong.")
         return
 
     if args.install:
         print("[INFO] Dang cai dat AI Agent Desktop Notifier...")
+        script_dir = Path(__file__).resolve().parent.parent
         if IS_WINDOWS:
-            script_dir = Path(__file__).resolve().parent.parent
             local_install = script_dir / "install.ps1"
             if local_install.exists():
                 subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(local_install)], check=False)
             else:
-                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.ps1 | iex"], check=False)
+                print("[ERROR] Khong tim thay install.ps1 cuc bo.")
         else:
-            subprocess.run(["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash"], check=False)
+            local_install = script_dir / "install.sh"
+            if local_install.exists():
+                subprocess.run(["bash", str(local_install)], check=False)
+            else:
+                print("[ERROR] Khong tim thay install.sh cuc bo.")
         return
 
     # 1. Session capture mode
@@ -2315,7 +2600,14 @@ def main():
         project_hint=args.project_hint,
     )
 
-    is_completion = any(k in args.title.lower() for k in ["hoàn thành", "complete", "finish", "done", "thành công"])
+    if args.event_type:
+        is_completion = (args.event_type == "complete")
+    else:
+        # Conservative fallback if --event-type is not provided
+        t_low = args.title.lower()
+        has_complete_word = any(k in t_low for k in ["hoàn thành", "complete", "finish", "done", "thành công"])
+        has_action_word = any(k in t_low for k in ["câu hỏi", "hỏi", "question", "ask", "quyền", "permission", "grant", "exec", "run"])
+        is_completion = has_complete_word and not has_action_word
 
     if not is_completion:
         notif_item = {
@@ -2325,6 +2617,7 @@ def main():
             "message": message,
             "questions_json": args.questions_json,
             "urgency": args.urgency,
+            "event_type": args.event_type or "info",
             "sound": args.sound,
             "target_window_id": target_window_id,
             "caller_pid": args.caller_pid,
@@ -2333,7 +2626,8 @@ def main():
             "timeout": args.timeout,
             "created_at": time.time(),
         }
-        save_to_queue(queue_key, notif_item)
+        if not args.from_queue:
+            save_to_queue(queue_key, notif_item)
     else:
         remove_from_queue(queue_key)
 
@@ -2357,6 +2651,7 @@ def main():
         session_id=args.session_id,
         queue_key=queue_key,
         auto_dismiss_delay=args.auto_dismiss_delay,
+        event_type=args.event_type,
     )
 
 

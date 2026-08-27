@@ -174,18 +174,16 @@ def cmd_update():
             update_script = repo_dir / "update.ps1"
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(update_script)])
             return res.returncode
-        cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.ps1 | iex"]
-        res = subprocess.run(cmd)
-        return res.returncode
+        print("[ERROR] Khong tim thay update.ps1 cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+        return 1
 
     if repo_dir and (repo_dir / "update.sh").exists():
         update_script = repo_dir / "update.sh"
         res = subprocess.run(["bash", str(update_script)])
         return res.returncode
 
-    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/update.sh | bash"]
-    res = subprocess.run(cmd)
-    return res.returncode
+    print("[ERROR] Khong tim thay update.sh cuc bo. Vui long cap nhat tu thu muc repository hoac ban release chinh thuc.")
+    return 1
 
 
 def cmd_uninstall():
@@ -198,18 +196,16 @@ def cmd_uninstall():
             uninstall_script = repo_dir / "uninstall.ps1"
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(uninstall_script)])
             return res.returncode
-        cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.ps1 | iex"]
-        res = subprocess.run(cmd)
-        return res.returncode
+        print("[ERROR] Khong tim thay uninstall.ps1 cuc bo. Vui long go cai dat tu thu muc repository.")
+        return 1
 
     if repo_dir and (repo_dir / "uninstall.sh").exists():
         uninstall_script = repo_dir / "uninstall.sh"
         res = subprocess.run(["bash", str(uninstall_script)])
         return res.returncode
 
-    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/uninstall.sh | bash"]
-    res = subprocess.run(cmd)
-    return res.returncode
+    print("[ERROR] Khong tim thay uninstall.sh cuc bo. Vui long go cai dat tu thu muc repository.")
+    return 1
 
 
 def cmd_install():
@@ -222,18 +218,16 @@ def cmd_install():
             install_script = repo_dir / "install.ps1"
             res = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", str(install_script)])
             return res.returncode
-        cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-Command", "irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.ps1 | iex"]
-        res = subprocess.run(cmd)
-        return res.returncode
+        print("[ERROR] Khong tim thay install.ps1 cuc bo.")
+        return 1
 
     if repo_dir and (repo_dir / "install.sh").exists():
         install_script = repo_dir / "install.sh"
         res = subprocess.run(["bash", str(install_script)])
         return res.returncode
 
-    cmd = ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.sh | bash"]
-    res = subprocess.run(cmd)
-    return res.returncode
+    print("[ERROR] Khong tim thay install.sh cuc bo.")
+    return 1
 
 
 def cmd_config():
@@ -263,6 +257,62 @@ def cmd_config():
     return 0
 
 
+def cmd_doctor():
+    """Runs a deep health check and diagnoses discrepancies between repo and installed runtime."""
+    print("=" * 60)
+    print(f"anoti Doctor (AI Agent Desktop Notifier) v{VERSION}")
+    print("=" * 60)
+
+    issues = 0
+    # 1. Check installed runtime engine
+    if not NOTIFIER_PY.exists():
+        print(f"[ERROR] Engine thong bao chua duoc cai dat tai: {NOTIFIER_PY}")
+        print("        Khuyen nghi: Chay 'anoti install' de cai dat.")
+        issues += 1
+    else:
+        print(f"[OK] Engine da cai dat tai: {NOTIFIER_PY}")
+        # Compare hash with repo if in repo
+        repo_dir = get_repo_dir()
+        if repo_dir:
+            repo_engine = repo_dir / "bin" / "multi-desktop-notify.py"
+            if repo_engine.exists():
+                import hashlib
+                with open(NOTIFIER_PY, "rb") as f1, open(repo_engine, "rb") as f2:
+                    h_installed = hashlib.sha256(f1.read()).hexdigest()
+                    h_repo = hashlib.sha256(f2.read()).hexdigest()
+                if h_installed != h_repo:
+                    print("[WARNING] File engine da cai dat KHAC voi ban ma nguon trong repository!")
+                    print("          Khuyen nghi: Chay 'anoti install' hoac './install.sh' de dong bo.")
+                    issues += 1
+                else:
+                    print("[OK] Phien ban engine da dong bo 100% voi repository.")
+
+    # 2. Check dependencies
+    if not IS_WINDOWS:
+        for tool in ["xdotool", "wmctrl", "paplay"]:
+            res = subprocess.run(["which", tool], capture_output=True, text=True)
+            if res.returncode == 0:
+                print(f"[OK] Dependency: {tool} san sang ({res.stdout.strip()})")
+            else:
+                print(f"[WARNING] Dependency: {tool} chua duoc cai dat.")
+                issues += 1
+
+    # 3. Check Session / Queue cache permissions
+    runtime_dir = USER_HOME / ".local" / "state" / "ai-agent-notifier"
+    if runtime_dir.exists():
+        print(f"[OK] Runtime state directory: {runtime_dir}")
+    else:
+        print("[-] Runtime state directory chua duoc tao (se tu dong khoi tao khi chay).")
+
+    print("-" * 60)
+    if issues == 0:
+        print("[OK] He thong hoat dong hoan hao, khong phat hien van de nao.")
+    else:
+        print(f"[!] Phat hien {issues} van de can luu y.")
+    print("=" * 60)
+    return 0 if issues == 0 else 1
+
+
 def main():
     argv = sys.argv[1:]
     if argv and argv[0] in ("update", "up"):
@@ -271,6 +321,8 @@ def main():
         sys.exit(cmd_uninstall())
     elif argv and argv[0] in ("install", "reinstall"):
         sys.exit(cmd_install())
+    elif argv and argv[0] in ("doctor", "doc", "check"):
+        sys.exit(cmd_doctor())
     elif argv and argv[0] in ("focus", "f"):
         sys.exit(cmd_focus())
     elif argv and argv[0] in ("test", "t"):
@@ -289,8 +341,8 @@ def main():
     parser.add_argument(
         "action",
         nargs="?",
-        choices=["update", "uninstall", "install", "test", "status", "config", "focus"],
-        help="Action to perform (update, uninstall, install, test, status, config, focus)",
+        choices=["update", "uninstall", "install", "doctor", "test", "status", "config", "focus"],
+        help="Action to perform (update, uninstall, install, doctor, test, status, config, focus)",
     )
     parser.add_argument(
         "--focus", "-f",
