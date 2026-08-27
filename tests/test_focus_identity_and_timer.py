@@ -305,11 +305,12 @@ class TestFocusVerificationAndQueueTransaction(unittest.TestCase):
         self.assertIn("key_002", mdn.load_notification_queue())
 
         # Calling focus_active_or_queued_notification with failure preserves key
-        with patch.object(mdn, "kill_previous_instance"), patch.object(mdn, "pop_next_notification_async"):
+        with patch.object(mdn, "kill_previous_instance") as mock_kill, patch.object(mdn, "pop_next_notification_async"):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 1)
             # Item remains in queue!
             self.assertIn("key_002", mdn.load_notification_queue())
+            mock_kill.assert_not_called()
 
 
 class TestNonStealingPopupConfig(unittest.TestCase):
@@ -476,6 +477,55 @@ class TestWaylandActiveWindowDetection(unittest.TestCase):
             target_wid="wayland:gnome-terminal",
             wayland_windows=active_windows,
         ))
+
+
+class TestWaylandWindowFocusAdapter(unittest.TestCase):
+    """Tests GNOME Shell D-Bus activation and post-focus verification."""
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "get_session_window_info", return_value=None)
+    @patch.object(mdn, "get_wayland_active_windows", return_value=[{"app_name": "code", "pid": 700, "title": "project"}])
+    @patch.object(mdn, "wayland_window_matches_target", return_value=True)
+    @patch.object(mdn.subprocess, "run")
+    def test_focus_wayland_target_uses_shell_adapter_and_verifies(
+        self, mock_run, mock_match, mock_windows, mock_session, mock_wayland
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="(true,)")
+
+        self.assertTrue(mdn.focus_wayland_target_window(
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            verify_timeout=0.05,
+        ))
+        command = mock_run.call_args.args[0]
+        self.assertIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindow", command)
+        self.assertIn("900", command)
+        self.assertIn("project", command)
+        mock_match.assert_called_once()
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "get_session_window_info", return_value=None)
+    @patch.object(mdn.subprocess, "run")
+    def test_focus_wayland_target_reports_unavailable_adapter(self, mock_run, mock_session, mock_wayland):
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        self.assertFalse(mdn.focus_wayland_target_window(caller_pid=900, project_hint="project"))
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "focus_wayland_target_window", return_value=True)
+    def test_focus_target_window_accepts_empty_x11_id_on_wayland(self, mock_wayland_focus, mock_wayland):
+        self.assertTrue(mdn.focus_target_window(
+            "",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+        ))
+        mock_wayland_focus.assert_called_once_with(
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            verify_timeout=0.8,
+        )
 
 
 if __name__ == "__main__":

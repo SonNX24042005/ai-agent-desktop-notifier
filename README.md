@@ -18,6 +18,7 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
   - **Tầng 3 (Window ID trực tiếp)**: Xác thực ID cửa sổ được truyền trực tiếp qua tham số `--window-id` (phải là cửa sổ nhà phát triển hợp lệ).
   - **Tầng 4 (Cửa sổ đang hoạt động)**: Lấy cửa sổ foreground hiện tại nếu là cửa sổ nhà phát triển phù hợp.
   - **Tầng 5 (Khớp tiêu đề cửa sổ)**: Tìm kiếm tên thư mục dự án trên tiêu đề các cửa sổ nhà phát triển đang mở.
+  - **Focus native Wayland**: Trên GNOME Shell, adapter compositor đi kèm dự án đưa đúng cửa sổ lên foreground bằng identity PID, project và title; không phụ thuộc vào X11 window ID.
 - **Hàng đợi thông báo thông minh giữa nhiều cửa sổ (multi-window notification queue)**: Khi có nhiều thông báo từ các cửa sổ / phiên làm việc AI agent khác nhau, hệ thống tự động lưu vào hàng đợi kèm số đếm trạng thái (ví dụ: `[1/3]`). Sau khi giải quyết xong cửa sổ hiện tại, hệ thống sẽ tự động bật lại thông báo còn tồn đọng của cửa sổ tiếp theo để bạn không bao giờ bị bỏ sót tác vụ.
 - **Tự động đóng khi người dùng chủ động mở cửa sổ (auto-dismiss on active window)**: Khi popup đang hiển thị mà bạn tự chuyển vào cửa sổ AI agent (qua chuột, thanh tác vụ hoặc `Alt + Tab`), hệ thống sẽ tự động phát hiện cửa sổ mục tiêu đã được kích hoạt và tự động đóng popup sau 1,5 giây, dọn hàng đợi mà không cần bạn phải thao tác đóng thủ công. Trên Wayland native, engine dùng AT-SPI để nhận diện cửa sổ active thay vì phụ thuộc vào `_NET_ACTIVE_WINDOW` của X11.
 - **Chống lặp thông báo (anti-spam deduplication)**: Băm nội dung bằng SHA-256 và áp dụng khoảng thời gian làm mát (cooldown) để tránh hiện tượng bắn liên tiếp nhiều thông báo trùng lặp.
@@ -175,6 +176,7 @@ ai-agent-desktop-notifier/
 │   ├── codex-notify.py           # Script xử lý thông báo OpenAI Codex (đa nền tảng)
 │   ├── antigravity-notify.py     # Script xử lý hook Google Antigravity (đa nền tảng)
 │   └── antigravity-notify.sh     # Script xử lý hook Google Antigravity (Linux)
+├── gnome-shell-extension/        # Adapter focus cửa sổ native Wayland trên GNOME Shell
 ├── install.ps1                   # Kịch bản cài đặt tự động trên Windows (PowerShell)
 ├── install.sh                    # Kịch bản cài đặt tự động trên Linux (Bash)
 ├── update.ps1                    # Kịch bản cập nhật trên Windows

@@ -9,8 +9,35 @@ CLAUDE_HOOKS="$USER_HOME/.claude/hooks"
 CODEX_DIR="$USER_HOME/.codex"
 GEMINI_HOOKS="$USER_HOME/.gemini/hooks"
 GEMINI_CONFIG="$USER_HOME/.gemini/config"
+GNOME_EXTENSION_UUID="ai-agent-desktop-notifier@sonnx24042005"
+GNOME_EXTENSION_DIR="$USER_HOME/.local/share/gnome-shell/extensions/$GNOME_EXTENSION_UUID"
 
 REPO_URL="https://github.com/SonNX24042005/ai-agent-desktop-notifier.git"
+
+queue_gnome_extension_enable() {
+    python3 - "$GNOME_EXTENSION_UUID" << 'PY'
+import ast
+import subprocess
+import sys
+
+uuid = sys.argv[1]
+try:
+    raw = subprocess.check_output(
+        ["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    enabled = ast.literal_eval(raw) if raw and raw != "@as []" else []
+    if uuid not in enabled:
+        enabled.append(uuid)
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(enabled)],
+            check=False,
+        )
+except Exception:
+    pass
+PY
+}
 
 # Determine source directory (support remote curl | bash execution)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
@@ -77,6 +104,26 @@ fi
 if [ -f "$SCRIPT_DIR/bin/anoti" ]; then
     cp "$SCRIPT_DIR/bin/anoti" "$LOCAL_BIN/anoti"
     chmod +x "$LOCAL_BIN/anoti"
+fi
+
+if command -v gnome-shell &>/dev/null && [ -d "$SCRIPT_DIR/gnome-shell-extension" ]; then
+    gnome-extensions disable "$GNOME_EXTENSION_UUID" &>/dev/null || true
+    mkdir -p "$GNOME_EXTENSION_DIR"
+    cp "$SCRIPT_DIR/gnome-shell-extension/metadata.json" "$GNOME_EXTENSION_DIR/metadata.json"
+    GNOME_SHELL_MAJOR="$(gnome-shell --version 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\)\..*/\1/p')"
+    if [ -n "$GNOME_SHELL_MAJOR" ] && [ "$GNOME_SHELL_MAJOR" -lt 45 ]; then
+        cp "$SCRIPT_DIR/gnome-shell-extension/extension-legacy.js" "$GNOME_EXTENSION_DIR/extension.js"
+    else
+        cp "$SCRIPT_DIR/gnome-shell-extension/extension-modern.js" "$GNOME_EXTENSION_DIR/extension.js"
+    fi
+    if command -v gnome-extensions &>/dev/null; then
+        if gnome-extensions enable "$GNOME_EXTENSION_UUID" &>/dev/null; then
+            echo "✓ Enabled GNOME Shell window focus adapter"
+        else
+            queue_gnome_extension_enable
+            echo "Warning: Log out and back in once to load the GNOME Shell window focus adapter."
+        fi
+    fi
 fi
 
 echo "=== 4. Merging configuration files safely ==="

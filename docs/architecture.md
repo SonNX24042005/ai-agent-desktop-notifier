@@ -62,6 +62,7 @@ Các quyết định thiết kế chính:
 | `hooks/codex-notify.py` | Adapter Codex đa nền tảng | Khi hợp đồng `notify` hoặc hook của Codex thay đổi |
 | `hooks/antigravity-notify.sh` | Adapter Antigravity được cài trên Linux; tên có đuôi `.sh` nhưng nội dung là Python | Khi payload hoặc sự kiện Antigravity trên Linux thay đổi |
 | `hooks/antigravity-notify.py` | Adapter Antigravity được cài trên Windows | Khi payload hoặc sự kiện Antigravity trên Windows thay đổi |
+| `gnome-shell-extension/` | Adapter compositor dùng D-Bus để focus chính xác cửa sổ native Wayland trên GNOME Shell 42–50 | Khi thay đổi identity hoặc focus trên Wayland |
 | `install.sh`, `install.ps1` | Cài file runtime, hợp nhất cấu hình agent và gửi thông báo thử | Khi thêm artifact, dependency hoặc tích hợp mới |
 | `update.sh`, `update.ps1` | Lấy bản mới và đồng bộ lại cài đặt | Khi quy trình phát hành hoặc migration thay đổi |
 | `uninstall.sh`, `uninstall.ps1` | Xóa artifact và cấu hình tích hợp | Khi installer bắt đầu sở hữu thêm dữ liệu |
@@ -81,6 +82,7 @@ Repository là nguồn phát triển, nhưng hook không chạy trực tiếp t�
 | Claude | `~/.claude/hooks/notify-input.sh` | `%USERPROFILE%\.claude\hooks\notify-claude.py` |
 | Codex | `~/.codex/notify.py` | `%USERPROFILE%\.codex\notify.py` |
 | Antigravity | `~/.gemini/hooks/notify-antigravity.sh` | `%USERPROFILE%\.gemini\hooks\notify-antigravity.py` |
+| Adapter focus Wayland | `~/.local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005` | Không áp dụng |
 
 Hệ quả quan trọng: sửa file trong repository không làm thay đổi bản đang chạy trong hồ sơ người dùng cho đến khi chạy lại installer hoặc updater.
 
@@ -232,7 +234,7 @@ Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` đ�
 ### 8.1. Bộ đếm thời gian Monotonic (1,5 giây continuous active)
 - Sử dụng `time.monotonic()` và chu kỳ kiểm tra 100ms.
 - Trên X11 và Windows: Đối chiếu chính xác ID cửa sổ active (`_NET_ACTIVE_WINDOW` / `GetForegroundWindow`).
-- Trên Linux Wayland thuần: Nhận diện qua PTY điều khiển (`/dev/pts/*`) kết hợp kiểm tra foreground process group (`pgrp == tpgid` trong `/proc/{pid}/stat`) để bảo đảm tiến trình caller đang ở foreground của terminal.
+- Trên Linux Wayland thuần: Đọc cửa sổ active qua AT-SPI và đối chiếu PID tổ tiên, project hint hoặc session fingerprint. PTY chỉ là fallback khi AT-SPI không khả dụng.
 - Reset `active_since = None` ngay lập tức khi người dùng chuyển sang cửa sổ khác hoặc rời khỏi terminal.
 - Chỉ đóng thông báo và dequeue khi đúng cửa sổ nguồn active liên tục đủ 1,5 giây.
 
@@ -249,6 +251,8 @@ Trên Linux X11/XWayland, engine:
 - Gửi EWMH ClientMessage `_NET_ACTIVE_WINDOW` kèm timestamp `CurrentTime` và `source indication = 2`;
 - Gọi `gdk_win.focus()`, `wmctrl -i -a` và `xdotool windowactivate --sync`;
 - Kiểm tra lại active window trong tối đa khoảng 0,4 giây.
+
+Trên GNOME Wayland native, engine không giả lập X11. `focus_wayland_target_window()` gửi identity gồm caller PID, project hint và title fingerprint qua D-Bus đến adapter GNOME Shell. Adapter chạy trong compositor, chỉ chấp nhận cửa sổ developer khớp duy nhất, gọi `Main.activateWindow()` để chuyển workspace và đưa cửa sổ lên foreground, sau đó engine xác minh lại qua AT-SPI. Nếu target mơ hồ hoặc focus thất bại, popup và queue item được giữ nguyên để người dùng thử lại.
 
 ## 9. Trạng thái và dữ liệu runtime
 
@@ -343,7 +347,7 @@ Mỗi webhook chạy nối tiếp trong một daemon thread, timeout từng requ
 | Không giành focus | `accept_focus=false`, notification window hint | Phụ thuộc compositor | `WS_EX_NOACTIVATE` |
 | Nhận diện cửa sổ active | `_NET_ACTIVE_WINDOW` qua `xdotool`/`xprop` | AT-SPI, đối chiếu PID, session và project | `GetForegroundWindow` |
 | Popup dự phòng | `notify-send` | `notify-send` | Windows toast |
-| Focus | GDK X11, `wmctrl`, `xdotool` | D-Bus cho GNOME Terminal | Win32 API |
+| Focus | GDK X11, `wmctrl`, `xdotool` | Adapter GNOME Shell qua D-Bus; GNOME Terminal D-Bus là fallback | Win32 API |
 | Chuyển workspace | `wmctrl` | Bị giới hạn bởi compositor | Không áp dụng |
 | Âm thanh | `paplay`, `pw-play`, `canberra-gtk-play` hoặc `aplay` | Tương tự | `winsound` khi có `--sound`; toast còn tuân theo cài đặt âm thanh hệ thống |
 
@@ -369,6 +373,7 @@ Trên Wayland native, `_NET_ACTIVE_WINDOW` không biểu diễn cửa sổ Wayla
 - ít nhất một trình phát âm thanh nếu cần âm thanh;
 - `wmctrl` để chuyển workspace và tăng độ tin cậy khi focus;
 - `gdbus` cho GNOME Terminal trên Wayland;
+- `gnome-extensions` và adapter đi kèm dự án để focus cửa sổ native Wayland;
 - `gsettings` nếu muốn đăng ký `Alt+Q` trên GNOME.
 
 Installer Linux hiện kiểm tra một phần các dependency này và chỉ hướng dẫn người dùng cài, không tự cài package hệ thống.
@@ -415,6 +420,7 @@ Phạm vi hiện tại:
 - timer auto-dismiss và hành vi reset;
 - cờ không giành focus;
 - token và D-Bus GNOME Terminal trên Wayland;
+- hợp đồng D-Bus, xác minh focus và bảo toàn queue khi adapter GNOME Wayland thất bại;
 - chọn backend Linux;
 - placement với monitor âm tọa độ, portrait, 4K, work area và nhiều monitor;
 - fallback từ X11 sang Wayland khi GTK không khởi tạo được.

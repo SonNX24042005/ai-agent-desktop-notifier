@@ -1580,16 +1580,76 @@ def switch_to_window_workspace(wid):
     return True
 
 
-def focus_target_window(window_id, verify_timeout=0.4):
+def focus_wayland_target_window(caller_pid=0, project_hint="", session_id="", verify_timeout=0.8):
+    """Requests exact native Wayland activation through the GNOME Shell adapter."""
+    if IS_WINDOWS or not is_wayland_session():
+        return False
+
+    session_info = get_session_window_info(session_id) if session_id else None
+    title_fingerprint = ""
+    if isinstance(session_info, dict):
+        title_fingerprint = str(session_info.get("title_fingerprint") or "").strip()
+
+    try:
+        result = subprocess.run(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "io.github.sonnx24042005.AiAgentNotifier",
+                "--object-path", "/io/github/sonnx24042005/AiAgentNotifier",
+                "--method", "io.github.sonnx24042005.AiAgentNotifier.FocusWindow",
+                str(max(int(caller_pid or 0), 0)),
+                str(project_hint or "")[:300],
+                title_fingerprint[:500],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return False
+
+    if result.returncode != 0 or "true" not in result.stdout.lower():
+        return False
+
+    deadline = time.monotonic() + max(float(verify_timeout), 0.0)
+    while time.monotonic() < deadline:
+        active_windows = get_wayland_active_windows()
+        if active_windows is None:
+            return True
+        if any(
+            wayland_window_matches_target(
+                window_info,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
+            for window_info in active_windows
+        ):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_hint="", session_id=""):
     """Activates and brings to front the specified target window ID.
     Returns True if focus activation was successfully verified, False otherwise.
     """
-    if not window_id:
-        return False
+    wid_str = str(window_id or "").strip()
 
-    wid_str = str(window_id).strip()
+    if is_wayland_session() and focus_wayland_target_window(
+        caller_pid=caller_pid,
+        project_hint=project_hint,
+        session_id=session_id,
+        verify_timeout=max(verify_timeout, 0.8),
+    ):
+        return True
+
     if wid_str == "wayland:gnome-terminal":
         return activate_gnome_terminal_via_dbus()
+
+    if not wid_str:
+        return False
 
     if not wid_str.isdigit():
         return False
@@ -1706,29 +1766,28 @@ def focus_active_or_queued_notification():
         pending.sort(key=lambda x: x[0])
 
         for _, k, item in pending:
+            caller_pid = item.get("caller_pid", 0)
+            project_hint = item.get("project_hint", "")
+            session_id = item.get("session_id", "")
             wid = item.get("target_window_id", "")
             if not wid or not is_valid_toplevel_window(wid):
                 wid = find_target_window(
                     window_id_arg="",
-                    caller_pid=item.get("caller_pid", 0),
-                    project_hint=item.get("project_hint", ""),
-                    session_id=item.get("session_id", ""),
+                    caller_pid=caller_pid,
+                    project_hint=project_hint,
+                    session_id=session_id,
                 )
-            if wid and is_valid_toplevel_window(wid):
+            if focus_target_window(
+                wid,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            ):
                 kill_previous_instance()
-                if focus_target_window(wid):
-                    remove_from_queue(k)
-                    pop_next_notification_async(exclude_key=k)
-                    return 0
-                else:
-                    # Focus failed: preserve in queue, try next
-                    continue
-            elif is_gnome_terminal_in_ancestry(item.get("caller_pid", 0)):
-                kill_previous_instance()
-                if activate_gnome_terminal_via_dbus():
-                    remove_from_queue(k)
-                    pop_next_notification_async(exclude_key=k)
-                    return 0
+                remove_from_queue(k)
+                pop_next_notification_async(exclude_key=k)
+                return 0
+            # Focus failed: preserve the queue item and try the next one.
 
     # Fallback if queue is empty: check session cache
     if os.path.exists(SESSION_CACHE_FILE):
@@ -1738,13 +1797,17 @@ def focus_active_or_queued_notification():
             valid_sessions = []
             for sid, sinfo in sessions.items():
                 if isinstance(sinfo, dict) and sinfo.get("window_id"):
-                    valid_sessions.append((sinfo.get("updated_at", 0), sinfo.get("window_id")))
+                    valid_sessions.append((sinfo.get("updated_at", 0), sid, sinfo))
             valid_sessions.sort(key=lambda x: x[0], reverse=True)
-            for _, wid in valid_sessions:
-                if is_valid_toplevel_window(wid):
+            for _, sid, sinfo in valid_sessions:
+                if focus_target_window(
+                    sinfo.get("window_id", ""),
+                    caller_pid=sinfo.get("pid", 0),
+                    project_hint=sinfo.get("project_hint", ""),
+                    session_id=sid,
+                ):
                     kill_previous_instance()
-                    if focus_target_window(wid):
-                        return 0
+                    return 0
         except Exception:
             pass
 
@@ -1913,12 +1976,18 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                 project_hint=project_hint,
                 session_id=session_id,
             )
-        focused = False
-        if wid_to_focus:
-            focused = focus_target_window(wid_to_focus)
+        focused = focus_target_window(
+            wid_to_focus,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+        )
+
+        if not focused:
+            return
 
         closing[0] = True
-        if focused and queue_key:
+        if queue_key:
             remove_from_queue(queue_key)
 
         pop_next_notification_async(exclude_key=queue_key)
@@ -2316,12 +2385,18 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     session_id=session_id,
                 )
 
-            focused = False
-            if wid_to_focus:
-                focused = focus_target_window(wid_to_focus)
+            focused = focus_target_window(
+                wid_to_focus,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
+
+            if not focused:
+                return
 
             closing[0] = True
-            if focused and queue_key:
+            if queue_key:
                 remove_from_queue(queue_key)
 
             pop_next_notification_async(exclude_key=queue_key)

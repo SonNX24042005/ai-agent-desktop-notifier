@@ -119,7 +119,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 0)
             # Oldest (key_0) should have been focused and removed first!
-            mock_focus.assert_called_with("1000")
+            mock_focus.assert_called_with("1000", caller_pid=0, project_hint="", session_id="s0")
             q = mdn.load_notification_queue()
             self.assertNotIn("key_0", q)
             self.assertIn("key_1", q)
@@ -139,7 +139,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
         with patch.object(mdn, "kill_previous_instance"), patch.object(mdn, "pop_next_notification_async"):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 0)
-            mock_focus.assert_called_with("1001")
+            mock_focus.assert_called_with("1001", caller_pid=0, project_hint="", session_id="sess_A")
 
 
 if __name__ == "__main__":

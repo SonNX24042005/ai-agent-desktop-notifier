@@ -8,6 +8,8 @@ LOCAL_BIN="$USER_HOME/.local/bin"
 CLAUDE_HOOKS="$USER_HOME/.claude/hooks"
 CODEX_DIR="$USER_HOME/.codex"
 GEMINI_HOOKS="$USER_HOME/.gemini/hooks"
+GNOME_EXTENSION_UUID="ai-agent-desktop-notifier@sonnx24042005"
+GNOME_EXTENSION_DIR="$USER_HOME/.local/share/gnome-shell/extensions/$GNOME_EXTENSION_UUID"
 
 echo "=== 1. Restoring configuration backups & removing hooks ==="
 
@@ -132,6 +134,33 @@ rm -f "$CLAUDE_HOOKS/notify-claude.py"
 rm -f "$CODEX_DIR/notify.py"
 rm -f "$GEMINI_HOOKS/notify-antigravity.sh"
 rm -f "$GEMINI_HOOKS/notify-antigravity.py"
+gnome-extensions disable "$GNOME_EXTENSION_UUID" &>/dev/null || true
+python3 - "$GNOME_EXTENSION_UUID" << 'PY'
+import ast
+import subprocess
+import sys
+
+uuid = sys.argv[1]
+try:
+    raw = subprocess.check_output(
+        ["gsettings", "get", "org.gnome.shell", "enabled-extensions"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).strip()
+    enabled = ast.literal_eval(raw) if raw and raw != "@as []" else []
+    if uuid in enabled:
+        enabled.remove(uuid)
+        subprocess.run(
+            ["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(enabled)],
+            check=False,
+        )
+except Exception:
+    pass
+PY
+if [ -d "$GNOME_EXTENSION_DIR" ]; then
+    find "$GNOME_EXTENSION_DIR" -mindepth 1 -maxdepth 1 -delete
+    rmdir "$GNOME_EXTENSION_DIR" 2>/dev/null || true
+fi
 rm -rf "${XDG_RUNTIME_DIR:-/tmp}/ai-agent-notifier"
 rm -f /tmp/ai_agent_notifier*
 

@@ -309,6 +309,9 @@ class TestLifecycleArtifactSymmetry(unittest.TestCase):
             ROOT_DIR / "hooks" / "codex-notify.py",
             ROOT_DIR / "hooks" / "antigravity-notify.sh",
             ROOT_DIR / "hooks" / "antigravity-notify.py",
+            ROOT_DIR / "gnome-shell-extension" / "metadata.json",
+            ROOT_DIR / "gnome-shell-extension" / "extension-modern.js",
+            ROOT_DIR / "gnome-shell-extension" / "extension-legacy.js",
             ROOT_DIR / "install.sh",
             ROOT_DIR / "install.ps1",
             ROOT_DIR / "update.sh",
@@ -318,6 +321,12 @@ class TestLifecycleArtifactSymmetry(unittest.TestCase):
         ]
         for art in required_artifacts:
             self.assertTrue(art.exists(), f"Artifact missing: {art}")
+
+    def test_gnome_focus_adapter_has_symmetric_lifecycle(self):
+        extension_uuid = "ai-agent-desktop-notifier@sonnx24042005"
+        for script_name in ("install.sh", "update.sh", "uninstall.sh"):
+            script = (ROOT_DIR / script_name).read_text(encoding="utf-8")
+            self.assertIn(extension_uuid, script)
 
 
 class TestWaylandControllingTTYAndDismiss(unittest.TestCase):
