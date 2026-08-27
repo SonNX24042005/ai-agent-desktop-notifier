@@ -31,6 +31,10 @@ else
     echo "=== 1. Updating from local source ==="
 fi
 
+if ! python3 -c "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi" &>/dev/null; then
+    echo "Warning: AT-SPI typelib is missing; install gir1.2-atspi-2.0 for Wayland auto-dismiss detection."
+fi
+
 echo "=== 2. Updating notification engine and hooks ==="
 mkdir -p "$LOCAL_BIN" "$CLAUDE_HOOKS" "$CODEX_DIR" "$GEMINI_HOOKS" "$GEMINI_CONFIG"
 
@@ -260,4 +264,3 @@ echo "=== 4. Update Complete! ==="
     --message="Phiên bản mới nhất và phím tắt Alt+Q đã được đồng bộ vào hệ thống." \
     --sound="/usr/share/sounds/freedesktop/stereo/complete.oga" \
     --timeout=4
-

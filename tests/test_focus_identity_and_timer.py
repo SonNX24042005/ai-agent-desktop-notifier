@@ -207,79 +207,64 @@ class TestAutoDismissTimerLogic(unittest.TestCase):
 
     def test_timer_countdown_and_trigger(self):
         auto_dismiss_delay = 1.5
-        active_since = [None]
-        closed = [False]
-
-        def on_close():
-            closed[0] = True
-
-        def step(now, is_target_active):
-            if is_target_active:
-                if active_since[0] is None:
-                    active_since[0] = now
-                elif (now - active_since[0]) >= auto_dismiss_delay:
-                    on_close()
-                    return False
-            else:
-                active_since[0] = None
-            return True
+        active_since = None
 
         t0 = 1000.0
         # t = 0.0s: target becomes active
-        self.assertTrue(step(t0, is_target_active=True))
-        self.assertFalse(closed[0])
-        self.assertEqual(active_since[0], t0)
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0
+        )
+        self.assertFalse(should_dismiss)
+        self.assertEqual(active_since, t0)
 
         # t = 1.0s: still active, not yet dismissed
-        self.assertTrue(step(t0 + 1.0, is_target_active=True))
-        self.assertFalse(closed[0])
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 1.0
+        )
+        self.assertFalse(should_dismiss)
 
         # t = 1.5s: delay reached, trigger dismiss!
-        res = step(t0 + 1.5, is_target_active=True)
-        self.assertFalse(res)
-        self.assertTrue(closed[0])
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 1.5
+        )
+        self.assertTrue(should_dismiss)
 
     def test_timer_resets_when_user_switches_away(self):
         auto_dismiss_delay = 1.5
-        active_since = [None]
-        closed = [False]
-
-        def on_close():
-            closed[0] = True
-
-        def step(now, is_target_active):
-            if is_target_active:
-                if active_since[0] is None:
-                    active_since[0] = now
-                elif (now - active_since[0]) >= auto_dismiss_delay:
-                    on_close()
-                    return False
-            else:
-                active_since[0] = None
-            return True
+        active_since = None
 
         t0 = 1000.0
         # Active for 1.2s
-        step(t0, is_target_active=True)
-        step(t0 + 1.2, is_target_active=True)
-        self.assertFalse(closed[0])
+        active_since, _ = mdn.update_auto_dismiss_state(active_since, True, auto_dismiss_delay, now=t0)
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 1.2
+        )
+        self.assertFalse(should_dismiss)
 
         # User switches away at t = 1.3s
-        step(t0 + 1.3, is_target_active=False)
-        self.assertIsNone(active_since[0])
-        self.assertFalse(closed[0])
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, False, auto_dismiss_delay, now=t0 + 1.3
+        )
+        self.assertIsNone(active_since)
+        self.assertFalse(should_dismiss)
 
         # User returns at t = 2.0s: must restart full 1.5s countdown
-        step(t0 + 2.0, is_target_active=True)
-        self.assertEqual(active_since[0], t0 + 2.0)
+        active_since, _ = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 2.0
+        )
+        self.assertEqual(active_since, t0 + 2.0)
 
         # t = 3.0s (only 1.0s continuous): should not close
-        step(t0 + 3.0, is_target_active=True)
-        self.assertFalse(closed[0])
+        active_since, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 3.0
+        )
+        self.assertFalse(should_dismiss)
 
         # t = 3.5s (1.5s continuous): closes!
-        step(t0 + 3.5, is_target_active=True)
-        self.assertTrue(closed[0])
+        _, should_dismiss = mdn.update_auto_dismiss_state(
+            active_since, True, auto_dismiss_delay, now=t0 + 3.5
+        )
+        self.assertTrue(should_dismiss)
 
 
 class TestFocusVerificationAndQueueTransaction(unittest.TestCase):
@@ -431,6 +416,66 @@ class TestIsTargetWindowActiveNoTTY(unittest.TestCase):
 
     def test_matching_target_returns_true(self):
         self.assertTrue(mdn.is_target_window_active("12345", target_wid="12345"))
+
+
+class TestWaylandActiveWindowDetection(unittest.TestCase):
+    """Tests native Wayland focus detection through AT-SPI window identity."""
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "is_pid_in_ancestry", return_value=True)
+    def test_active_atspi_window_matches_caller_process_and_project(self, mock_ancestry, mock_wayland):
+        active_windows = [{
+            "app_name": "code",
+            "pid": 700,
+            "title": "main.py - ai-agent-desktop-notifier - Visual Studio Code",
+        }]
+
+        self.assertTrue(mdn.is_target_window_active(
+            "",
+            caller_pid=900,
+            project_hint="ai-agent-desktop-notifier",
+            wayland_windows=active_windows,
+        ))
+        mock_ancestry.assert_called_once_with(700, 900)
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "is_pid_in_ancestry", return_value=True)
+    @patch.object(mdn, "has_recent_terminal_activity", return_value=True)
+    def test_atspi_nonmatch_does_not_use_terminal_fallback(self, mock_terminal, mock_ancestry, mock_wayland):
+        active_windows = [{
+            "app_name": "code",
+            "pid": 700,
+            "title": "other-project - Visual Studio Code",
+        }]
+
+        self.assertFalse(mdn.is_target_window_active(
+            "",
+            caller_pid=900,
+            project_hint="ai-agent-desktop-notifier",
+            wayland_windows=active_windows,
+        ))
+        mock_terminal.assert_not_called()
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "get_wayland_active_windows", return_value=None)
+    @patch.object(mdn, "has_recent_terminal_activity", return_value=True)
+    def test_terminal_activity_is_only_used_when_atspi_is_unavailable(self, mock_terminal, mock_windows, mock_wayland):
+        self.assertTrue(mdn.is_target_window_active("", caller_pid=900))
+        mock_terminal.assert_called_once_with(900)
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    def test_gnome_terminal_marker_matches_active_atspi_terminal(self, mock_wayland):
+        active_windows = [{
+            "app_name": "gnome-terminal-server",
+            "pid": 700,
+            "title": "Terminal",
+        }]
+
+        self.assertTrue(mdn.is_target_window_active(
+            "",
+            target_wid="wayland:gnome-terminal",
+            wayland_windows=active_windows,
+        ))
 
 
 if __name__ == "__main__":

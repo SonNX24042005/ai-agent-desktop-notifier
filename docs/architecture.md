@@ -216,7 +216,7 @@ stateDiagram-v2
 
 Khi focus bằng `anoti focus`, engine duyệt từ item cũ nhất. Item chỉ bị xóa sau khi focus đã được xác minh thành công. Nếu không có queue hợp lệ, engine thử session cache mới cập nhật gần nhất. Engine không focus một cửa sổ developer ngẫu nhiên.
 
-Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue.
+Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue. Cả hai backend dùng chung `update_auto_dismiss_state()` để chỉ đóng khi identity mục tiêu được xác nhận active liên tục đủ `auto_dismiss_delay` (mặc định 1,5 giây); khi người dùng chuyển sang cửa sổ khác, mốc thời gian được đặt lại.
 
 ## 8. Thuật toán nhận diện cửa sổ và chính sách focus
 
@@ -341,6 +341,7 @@ Mỗi webhook chạy nối tiếp trong một daemon thread, timeout từng requ
 | Overlay | GTK3/GDK | GTK3 nếu khởi tạo được | Tkinter |
 | Đặt đúng từng màn hình | Có, mỗi monitor một cửa sổ | Không bảo đảm; chỉ tạo một cửa sổ để tránh cascade | Có, dùng Win32 monitor API |
 | Không giành focus | `accept_focus=false`, notification window hint | Phụ thuộc compositor | `WS_EX_NOACTIVATE` |
+| Nhận diện cửa sổ active | `_NET_ACTIVE_WINDOW` qua `xdotool`/`xprop` | AT-SPI, đối chiếu PID, session và project | `GetForegroundWindow` |
 | Popup dự phòng | `notify-send` | `notify-send` | Windows toast |
 | Focus | GDK X11, `wmctrl`, `xdotool` | D-Bus cho GNOME Terminal | Win32 API |
 | Chuyển workspace | `wmctrl` | Bị giới hạn bởi compositor | Không áp dụng |
@@ -353,6 +354,8 @@ Backend Linux có hai biến override phục vụ chẩn đoán:
 
 `DEBUG_NOTIFY=1` in thông tin backend, số monitor và tọa độ placement.
 
+Trên Wayland native, `_NET_ACTIVE_WINDOW` không biểu diễn cửa sổ Wayland và thường trả về `0x0`. Engine vì vậy đọc các top-level window đang active qua AT-SPI, sau đó đối chiếu PID tổ tiên, project hint, session fingerprint hoặc marker GNOME Terminal. Nếu AT-SPI không khả dụng, engine chỉ dùng fallback terminal khi TTY vừa có I/O và một tiến trình trong cây tổ tiên đang sở hữu foreground process group; việc chỉ tồn tại một TTY không đủ để kết luận cửa sổ đang active.
+
 ## 11. Phụ thuộc runtime
 
 ### 11.1. Phụ thuộc bắt buộc hoặc gần bắt buộc trên Linux
@@ -361,6 +364,7 @@ Backend Linux có hai biến override phục vụ chẩn đoán:
 - `jq` cho adapter shell của Claude;
 - `xdotool` và `xprop` cho nhận diện cửa sổ X11;
 - PyGObject với GTK3/GDK cho overlay;
+- typelib AT-SPI 2 qua PyGObject để nhận diện cửa sổ active trên Wayland native; nếu thiếu, engine dùng fallback terminal có điều kiện;
 - `notify-send` cho fallback;
 - ít nhất một trình phát âm thanh nếu cần âm thanh;
 - `wmctrl` để chuyển workspace và tăng độ tin cậy khi focus;

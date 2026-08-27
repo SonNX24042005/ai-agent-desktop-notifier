@@ -1266,6 +1266,62 @@ def get_current_active_window():
     return ""
 
 
+def is_wayland_session(environ=None):
+    """Returns whether the current Linux desktop session uses Wayland."""
+    if IS_WINDOWS:
+        return False
+    if environ is None:
+        environ = os.environ
+    return bool(
+        environ.get("WAYLAND_DISPLAY")
+        or str(environ.get("XDG_SESSION_TYPE", "")).strip().lower() == "wayland"
+    )
+
+
+def get_wayland_active_windows():
+    """Returns active top-level windows exposed by AT-SPI on a Wayland session.
+
+    ``None`` means the accessibility API is unavailable. An empty list means the
+    API was queried successfully but did not report an active window.
+    """
+    if not is_wayland_session():
+        return None
+
+    try:
+        import gi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+
+        desktop = Atspi.get_desktop(0)
+        active_windows = []
+        app_count = min(max(desktop.get_child_count(), 0), 128)
+        for app_index in range(app_count):
+            try:
+                app = desktop.get_child_at_index(app_index)
+                app_name = str(app.get_name() or "").strip()
+                app_pid = int(app.get_process_id() or 0)
+                window_count = min(max(app.get_child_count(), 0), 64)
+            except Exception:
+                continue
+
+            for window_index in range(window_count):
+                try:
+                    window = app.get_child_at_index(window_index)
+                    states = window.get_state_set()
+                    if not states.contains(Atspi.StateType.ACTIVE):
+                        continue
+                    active_windows.append({
+                        "app_name": app_name,
+                        "pid": app_pid,
+                        "title": str(window.get_name() or "").strip(),
+                    })
+                except Exception:
+                    continue
+        return active_windows
+    except Exception:
+        return None
+
+
 def find_controlling_tty(start_pid):
     """Finds the controlling /dev/pts/* device by traversing the process ancestor chain on Linux."""
     if IS_WINDOWS or not start_pid or int(start_pid) <= 1:
@@ -1295,25 +1351,90 @@ def find_controlling_tty(start_pid):
     return None
 
 
-def is_pid_in_foreground(pid):
-    """Checks if a Linux process is in the foreground process group of its controlling terminal."""
+def is_terminal_session_active(pid):
+    """Checks whether pid or an ancestor owns the terminal foreground process group."""
     if IS_WINDOWS or not pid or int(pid) <= 1:
         return False
-    try:
-        with open(f"/proc/{int(pid)}/stat", "r") as f:
-            content = f.read()
+    current_pid = int(pid)
+    seen = set()
+    while current_pid > 1 and current_pid not in seen and len(seen) < 15:
+        seen.add(current_pid)
+        try:
+            with open(f"/proc/{current_pid}/stat", "r") as f:
+                content = f.read()
             comm_end = content.rfind(")")
-            if comm_end != -1:
-                fields = content[comm_end + 1:].split()
-                pgrp = int(fields[2])
-                tpgid = int(fields[5])
-                return pgrp > 0 and pgrp == tpgid
-    except Exception:
-        pass
+            if comm_end == -1:
+                break
+            fields = content[comm_end + 1:].split()
+            parent_pid = int(fields[1])
+            process_group = int(fields[2])
+            tty_nr = int(fields[4])
+            foreground_group = int(fields[5])
+            if tty_nr > 0 and process_group > 0 and process_group == foreground_group:
+                return True
+            current_pid = parent_pid
+        except Exception:
+            break
     return False
 
 
-def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id=""):
+def has_recent_terminal_activity(pid, max_age=30.0):
+    """Returns whether the caller terminal has recent I/O and a foreground process group."""
+    if not is_terminal_session_active(pid):
+        return False
+    tty_dev = find_controlling_tty(pid)
+    if not tty_dev or not os.path.exists(tty_dev):
+        return False
+    try:
+        tty_stat = os.stat(tty_dev)
+        now = time.time()
+        return (now - tty_stat.st_atime <= max_age) or (now - tty_stat.st_mtime <= max_age)
+    except Exception:
+        return False
+
+
+def is_developer_app_name(app_name):
+    """Checks an AT-SPI application name against known developer hosts."""
+    normalized = str(app_name or "").strip().lower().replace("_", "-")
+    if not normalized:
+        return False
+    return any(
+        dev_class.replace("_", "-") in normalized
+        or normalized in dev_class.replace("_", "-")
+        for dev_class in DEVELOPER_CLASSES
+    )
+
+
+def wayland_window_matches_target(window_info, target_wid="", caller_pid=0, project_hint="", session_id=""):
+    """Matches an active AT-SPI window to the notification source identity."""
+    if not isinstance(window_info, dict):
+        return False
+
+    app_name = str(window_info.get("app_name") or "").strip().lower()
+    title = str(window_info.get("title") or "").strip().lower()
+    active_pid = int(window_info.get("pid") or 0)
+    hint = str(project_hint or "").strip().lower()
+
+    if str(target_wid or "").strip() == "wayland:gnome-terminal":
+        return "gnome-terminal" in app_name or "terminal" in app_name
+
+    session_info = get_session_window_info(session_id) if session_id else None
+    if isinstance(session_info, dict):
+        title_fingerprint = str(session_info.get("title_fingerprint") or "").strip()
+        app_hint = str(session_info.get("app_hint") or "").strip().lower()
+        if title_fingerprint and title and titles_compatible(title_fingerprint, title):
+            return is_developer_app_name(app_name)
+        if app_hint and app_hint in app_name and (not hint or hint in title):
+            return True
+
+    caller = int(caller_pid or 0)
+    if caller > 1 and active_pid > 1 and is_pid_in_ancestry(active_pid, caller):
+        return not hint or hint in title
+
+    return bool(hint and hint in title and is_developer_app_name(app_name))
+
+
+def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id="", wayland_windows=None):
     """Checks if active_wid corresponds to the target application window that triggered the notification."""
     # 1. Direct match with active_wid if active_wid is available (X11 / Windows)
     if active_wid:
@@ -1353,22 +1474,37 @@ def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hin
                     if is_developer_window(active_wid_str):
                         return True
 
-    # 2. Wayland native fallback: when active_wid cannot be polled from Wayland compositor
-    if not IS_WINDOWS and caller_pid and int(caller_pid) > 1:
-        c_pid = int(caller_pid)
-        tty_dev = find_controlling_tty(c_pid)
-        if tty_dev and os.path.exists(tty_dev):
-            try:
-                st = os.stat(tty_dev)
-                now = time.time()
-                # Check if terminal was active recently (within 30s) AND process is in foreground
-                if (now - st.st_atime <= 30.0) or (now - st.st_mtime <= 30.0):
-                    if is_pid_in_foreground(c_pid):
-                        return True
-            except Exception:
-                pass
+    # 2. Native Wayland: use AT-SPI because X11's _NET_ACTIVE_WINDOW is unavailable.
+    if is_wayland_session():
+        detected_windows = get_wayland_active_windows() if wayland_windows is None else wayland_windows
+        if detected_windows is not None:
+            return any(
+                wayland_window_matches_target(
+                    window_info,
+                    target_wid=target_wid,
+                    caller_pid=caller_pid,
+                    project_hint=project_hint,
+                    session_id=session_id,
+                )
+                for window_info in detected_windows
+            )
+
+        # AT-SPI can be disabled on minimal desktops. Preserve the existing
+        # terminal heuristic, but require both recent I/O and a foreground group.
+        if caller_pid and int(caller_pid) > 1:
+            return has_recent_terminal_activity(int(caller_pid))
 
     return False
+
+
+def update_auto_dismiss_state(active_since, is_active, delay, now=None):
+    """Updates the continuous-focus timer and reports whether dismissal is due."""
+    current_time = time.monotonic() if now is None else float(now)
+    if not is_active or delay <= 0:
+        return None, False
+    if active_since is None:
+        return current_time, False
+    return active_since, (current_time - active_since) >= delay
 
 
 def get_queue_key(session_id="", window_id="", caller_pid=0, project_hint=""):
@@ -1918,28 +2054,28 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                     session_id=session_id,
                 )
             active_wid = get_current_active_window()
-            if is_target_window_active(
+            target_is_active = is_target_window_active(
                 active_wid,
                 target_wid=target_window_id,
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
-            ):
-                now = time.monotonic()
-                if active_since[0] is None:
-                    active_since[0] = now
-                elif (now - active_since[0]) >= auto_dismiss_delay:
-                    handle_close_only()
-                    return
-            else:
-                active_since[0] = None
+            )
+            active_since[0], should_dismiss = update_auto_dismiss_state(
+                active_since[0],
+                target_is_active,
+                auto_dismiss_delay,
+            )
+            if should_dismiss:
+                handle_close_only()
+                return
 
             root.after(100, check_active_timer)
 
         root.after(100, check_active_timer)
 
-    effective_timeout = timeout if timeout > 0 else 15
-    root.after(int(effective_timeout * 1000), handle_close_only)
+    if timeout > 0:
+        root.after(int(timeout * 1000), handle_close_only)
 
     root.mainloop()
 
@@ -2381,30 +2517,28 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     )
 
                 active_wid = get_current_active_window()
-                if is_target_window_active(
+                target_is_active = is_target_window_active(
                     active_wid,
                     target_wid=target_window_id,
                     caller_pid=caller_pid,
                     project_hint=project_hint,
                     session_id=session_id,
-                ):
-                    now = time.monotonic()
-                    if active_since[0] is None:
-                        active_since[0] = now
-                    elif (now - active_since[0]) >= auto_dismiss_delay:
-                        if queue_key:
-                            remove_from_queue(queue_key)
-                        handle_close_only()
-                        return False
-                else:
-                    active_since[0] = None
+                )
+                active_since[0], should_dismiss = update_auto_dismiss_state(
+                    active_since[0],
+                    target_is_active,
+                    auto_dismiss_delay,
+                )
+                if should_dismiss:
+                    handle_close_only()
+                    return False
 
                 return True
 
             GLib.timeout_add(100, check_target_window_active_timer)
 
-        effective_timeout = timeout if timeout > 0 else 15
-        GLib.timeout_add_seconds(effective_timeout, handle_close_only)
+        if timeout > 0:
+            GLib.timeout_add_seconds(timeout, handle_close_only)
 
         Gtk.main()
     except Exception:

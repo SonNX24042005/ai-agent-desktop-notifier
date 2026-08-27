@@ -169,7 +169,7 @@ if [ -x "$MULTI_NOTIFY" ]; then
         --project-hint="$project_hint" \
         --terminal-screen="$terminal_screen" \
         --session-id="$session_id" \
-        --timeout="${timeout:-5}" </dev/null >/dev/null 2>&1 &
+        --timeout="${timeout:-0}" </dev/null >/dev/null 2>&1 &
     disown
 fi
 

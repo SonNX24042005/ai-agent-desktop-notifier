@@ -80,7 +80,7 @@ def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo h
         f"--caller-pid={caller_pid}",
         f"--project-hint={project_hint}",
         f"--session-id={session_id}",
-        "--timeout=10",
+        "--timeout=0",
         "--auto-dismiss-delay=1.5",
     ]
     if not IS_WINDOWS:

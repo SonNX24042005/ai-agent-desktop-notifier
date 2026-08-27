@@ -39,9 +39,13 @@ if ! python3 -c "import gi; gi.require_version('Gtk', '3.0')" &>/dev/null; then
     MISSING_PKGS+=("python3-gi")
 fi
 
+if ! python3 -c "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi" &>/dev/null; then
+    MISSING_PKGS+=("gir1.2-atspi-2.0")
+fi
+
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "WARNING: Missing dependencies: ${MISSING_PKGS[*]}"
-    echo "Please install them via: sudo apt update && sudo apt install -y libnotify-bin jq pulseaudio-utils sound-theme-freedesktop python3-gi xdotool"
+    echo "Please install them via: sudo apt update && sudo apt install -y libnotify-bin jq pulseaudio-utils sound-theme-freedesktop python3-gi gir1.2-atspi-2.0 xdotool"
 fi
 
 echo "=== 2. Creating target directories ==="
@@ -275,4 +279,3 @@ echo "Testing desktop notification on all screens..."
     --message="Hệ thống thông báo đa màn hình kèm âm thanh và phím tắt Alt+Q đã sẵn sàng." \
     --sound="/usr/share/sounds/freedesktop/stereo/complete.oga" \
     --timeout=4
-
