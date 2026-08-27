@@ -72,7 +72,7 @@ if event_name == "SessionStart" or notif_type == "SessionStart":
             "--capture-session",
             f"--session-id={session_id}",
             f"--window-id={caller_win}",
-            f"--caller-pid={os.getpid()}",
+            f"--caller-pid={os.getppid()}",
             f"--project-hint={project_hint}",
         ]
         creationflags = 0x08000000 if IS_WINDOWS else 0
@@ -156,7 +156,7 @@ if os.path.exists(MULTI_NOTIFY):
         f"--questions-json={questions_json}",
         f"--urgency={urgency}",
         f"--window-id={caller_win}",
-        f"--caller-pid={os.getpid()}",
+        f"--caller-pid={os.getppid()}",
         f"--project-hint={project_hint}",
         f"--session-id={session_id}",
         f"--timeout={timeout}",

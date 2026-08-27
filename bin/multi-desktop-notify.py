@@ -33,9 +33,13 @@ else:
 
 PID_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier.pid")
 SESSION_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_sessions.json")
+SESSION_LOCK_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_sessions.lock")
 DEDUPE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_dedupe.json")
 QUEUE_CACHE_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_queue.json")
+QUEUE_LOCK_FILE = os.path.join(TEMP_DIR, "ai_agent_notifier_queue.lock")
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
+FOCUS_MAX_ENTRIES = 64
+FOCUS_MAX_AGE = 86400  # 24 hours
 
 # Ensure DISPLAY and XAUTHORITY are available in background hook processes on Linux
 if not IS_WINDOWS:
@@ -45,7 +49,8 @@ if not IS_WINDOWS:
                 os.environ["DISPLAY"] = disp
                 break
         else:
-            os.environ["DISPLAY"] = ":1"
+            if not os.environ.get("WAYLAND_DISPLAY"):
+                os.environ["DISPLAY"] = ":1"
 
     if not os.environ.get("XDG_RUNTIME_DIR"):
         try:
@@ -185,55 +190,198 @@ WIN_DEVELOPER_EXES = [
 
 
 # ---------------------------------------------------------------------------
-# Session Cache & Queue Management
+# Process-Safe File Locking & Atomic JSON Operations
 # ---------------------------------------------------------------------------
-def save_session_window(session_id, window_id, project_hint="", pid=0):
-    """Caches target window ID for a session ID to enable 100% precision focus."""
-    if not session_id or not window_id:
-        return
-    if not is_developer_window(window_id):
-        return
-    sessions = {}
-    if os.path.exists(SESSION_CACHE_FILE):
-        try:
-            with open(SESSION_CACHE_FILE, "r") as f:
-                sessions = json.load(f)
-        except Exception:
-            sessions = {}
-    sessions[str(session_id)] = {
-        "window_id": str(window_id).strip(),
-        "project_hint": str(project_hint or "").strip(),
-        "pid": int(pid or 0),
-        "updated_at": time.time(),
-    }
-    now = time.time()
-    # Prune old sessions older than 24 hours
-    sessions = {k: v for k, v in sessions.items() if now - v.get("updated_at", 0) < 86400}
+import contextlib
+
+@contextlib.contextmanager
+def file_lock(lock_path, timeout=1.0):
+    """Cross-platform inter-process file lock using flock on Linux and spin-mkdir on Windows."""
+    start_time = time.monotonic()
+    fd = None
+    acquired = False
     try:
-        with open(SESSION_CACHE_FILE, "w") as f:
-            json.dump(sessions, f)
+        if IS_WINDOWS:
+            lock_dir = lock_path + ".dirlock"
+            while time.monotonic() - start_time < timeout:
+                try:
+                    os.mkdir(lock_dir)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.02)
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    try:
+                        os.rmdir(lock_dir)
+                    except Exception:
+                        pass
+        else:
+            import fcntl
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+                while time.monotonic() - start_time < timeout:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except (BlockingIOError, OSError):
+                        time.sleep(0.02)
+            except Exception:
+                acquired = False
+
+            try:
+                yield acquired
+            finally:
+                if acquired and fd is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except Exception:
+                        pass
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
     except Exception:
-        pass
+        yield False
+
+
+def atomic_write_json(file_path, data):
+    """Atomically writes dictionary/list data to a JSON file via a temporary file and rename."""
+    tmp_path = f"{file_path}.tmp.{os.getpid()}_{int(time.time()*1000)}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, file_path)
+        return True
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        return False
+
+
+def safe_load_json(file_path, default=None):
+    """Safely reads JSON data from file, resetting gracefully on missing or corrupted file."""
+    if default is None:
+        default = {}
+    if not os.path.exists(file_path):
+        return default
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return default
+            return json.loads(content)
+    except Exception:
+        return default
+
+
+def prune_sessions(sessions, now=None, max_entries=FOCUS_MAX_ENTRIES, max_age=FOCUS_MAX_AGE):
+    """Prunes expired sessions (>24h) and caps total count to max_entries (keeps newest)."""
+    if now is None:
+        now = time.time()
+    valid = {}
+    for sid, entry in sessions.items():
+        if isinstance(entry, dict):
+            if now - entry.get("updated_at", 0) < max_age:
+                valid[str(sid)] = entry
+        elif isinstance(entry, str) and entry.strip():
+            valid[str(sid)] = {"window_id": entry.strip(), "updated_at": now, "precision": "window"}
+
+    if len(valid) <= max_entries:
+        return valid
+
+    # Sort descending by updated_at
+    sorted_items = sorted(valid.items(), key=lambda item: item[1].get("updated_at", 0), reverse=True)
+    return dict(sorted_items[:max_entries])
+
+
+# ---------------------------------------------------------------------------
+# Session Cache & Window Identity Store
+# ---------------------------------------------------------------------------
+def save_session_window(session_id, window_id, project_hint="", pid=0, precision="window", app_hint="", title_fingerprint=""):
+    """Caches target window identity for a session ID with lock, atomic write, and cache protection."""
+    if not session_id or not window_id:
+        return False
+    wid_str = str(window_id).strip()
+    if not is_developer_window(wid_str):
+        return False
+
+    with file_lock(SESSION_LOCK_FILE, timeout=1.0):
+        sessions = safe_load_json(SESSION_CACHE_FILE, default={})
+        existing = sessions.get(str(session_id))
+        if existing and isinstance(existing, dict):
+            # Cache protection: do not overwrite high-precision cache with lower or unverified precision
+            existing_prec = existing.get("precision", "window")
+            if existing_prec == "window" and precision not in ("window", "authoritative"):
+                return False
+
+        sessions[str(session_id)] = {
+            "window_id": wid_str,
+            "project_hint": str(project_hint or "").strip(),
+            "pid": int(pid or 0),
+            "app_hint": str(app_hint or "").strip(),
+            "title_fingerprint": str(title_fingerprint or "").strip(),
+            "precision": precision,
+            "backend": "windows" if IS_WINDOWS else "x11",
+            "updated_at": time.time(),
+        }
+        sessions = prune_sessions(sessions)
+        return atomic_write_json(SESSION_CACHE_FILE, sessions)
+
+
+def get_session_window_info(session_id):
+    """Retrieves cached identity metadata dictionary for a session ID."""
+    if not session_id or not os.path.exists(SESSION_CACHE_FILE):
+        return None
+    with file_lock(SESSION_LOCK_FILE, timeout=0.5):
+        sessions = safe_load_json(SESSION_CACHE_FILE, default={})
+        entry = sessions.get(str(session_id))
+        if isinstance(entry, dict):
+            return entry
+        elif isinstance(entry, str) and entry.strip():
+            return {"window_id": entry.strip(), "precision": "window"}
+    return None
 
 
 def get_session_window(session_id):
-    """Retrieves cached window ID for a session."""
-    if not session_id or not os.path.exists(SESSION_CACHE_FILE):
+    """Retrieves and validates cached window ID for a session.
+
+    Performs stale handle and fingerprint validation to avoid misfocusing
+    reused or closed window IDs.
+    """
+    info = get_session_window_info(session_id)
+    if not info:
         return ""
-    try:
-        with open(SESSION_CACHE_FILE, "r") as f:
-            sessions = json.load(f)
-        s_info = sessions.get(str(session_id))
-        wid = ""
-        if s_info and isinstance(s_info, dict):
-            wid = s_info.get("window_id", "")
-        elif isinstance(s_info, str):
-            wid = s_info
-        if wid and is_developer_window(wid):
-            return wid
-    except Exception:
-        pass
-    return ""
+    wid = info.get("window_id", "")
+    if not wid or not is_valid_toplevel_window(wid):
+        return ""
+    if not is_developer_window(wid):
+        return ""
+
+    # Stale handle / fingerprint verification:
+    cached_pid = int(info.get("pid", 0))
+    if cached_pid > 0:
+        cur_pid = get_window_pid(wid)
+        if cur_pid > 0 and cur_pid != cached_pid:
+            # PID mismatch: window ID reused by OS for another process
+            return ""
+
+    cached_hint = (info.get("project_hint") or "").strip().lower()
+    if cached_hint:
+        title = find_window_title(wid)
+        if title and cached_hint not in title and not is_developer_window(wid):
+            return ""
+
+    return wid
 
 
 def is_duplicate_notification(app_name, title, message, dedupe_seconds=2):
@@ -555,6 +703,8 @@ def is_valid_toplevel_window(wid):
     if not wid:
         return False
     wid_str = str(wid).strip()
+    if wid_str == "wayland:gnome-terminal":
+        return True
     if not wid_str.isdigit():
         return False
 
@@ -628,6 +778,99 @@ def get_process_ancestors(pid):
     return ancestors
 
 
+def get_window_pid(wid):
+    """Returns the process ID owning the given window ID, or 0 if unavailable."""
+    if not wid or not str(wid).strip().isdigit():
+        return 0
+    wid_str = str(wid).strip()
+    if IS_WINDOWS:
+        try:
+            hwnd = int(wid_str)
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return int(pid.value or 0)
+        except Exception:
+            return 0
+    try:
+        wpid_str = subprocess.check_output(["xdotool", "getwindowpid", wid_str], stderr=subprocess.DEVNULL).decode().strip()
+        if wpid_str.isdigit():
+            return int(wpid_str)
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_PID"], stderr=subprocess.DEVNULL).decode()
+        if "=" in out:
+            val = out.split("=")[1].strip()
+            if val.isdigit():
+                return int(val)
+    except Exception:
+        pass
+    return 0
+
+
+def is_pid_in_ancestry(target_pid, start_pid=0):
+    """Checks whether target_pid exists in the ancestor process chain of start_pid."""
+    t_pid = int(target_pid or 0)
+    s_pid = int(start_pid or 0)
+    if t_pid <= 1 or s_pid <= 1:
+        return False
+    if t_pid == s_pid:
+        return True
+    ancestors = get_process_ancestors(s_pid)
+    return t_pid in ancestors
+
+
+def is_gnome_terminal_in_ancestry(start_pid):
+    """Checks if gnome-terminal-server exists in the ancestor process chain of start_pid."""
+    curr = int(start_pid or 0)
+    if curr <= 1 or IS_WINDOWS:
+        return False
+    visited = set()
+    while curr > 1 and curr not in visited:
+        visited.add(curr)
+        try:
+            with open(f"/proc/{curr}/comm", "r") as f:
+                comm = f.read().strip().lower()
+                if "gnome-terminal" in comm:
+                    return True
+        except Exception:
+            pass
+        try:
+            with open(f"/proc/{curr}/cmdline", "r") as f:
+                cmdline = f.read().lower()
+                if "gnome-terminal" in cmdline:
+                    return True
+        except Exception:
+            pass
+        try:
+            with open(f"/proc/{curr}/stat", "r") as f:
+                curr = int(f.read().split()[3])
+        except Exception:
+            break
+    return False
+
+
+def activate_gnome_terminal_via_dbus():
+    """Activates and raises GNOME Terminal via D-Bus session bus on GNOME Wayland."""
+    try:
+        res = subprocess.run(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "org.gnome.Terminal",
+                "--object-path", "/org/gnome/Terminal",
+                "--method", "org.gtk.Application.Activate",
+                "{}"
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+            check=False
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def get_window_wm_class(wid):
     """Returns the window class tuple (instance, class_name) in lowercase."""
     if not wid or not str(wid).strip().isdigit():
@@ -657,6 +900,8 @@ def get_window_wm_class(wid):
 
 def is_developer_window(wid):
     """Checks whether a window belongs to a known developer host (IDE, editor, or terminal)."""
+    if str(wid).strip() == "wayland:gnome-terminal":
+        return True
     if not is_valid_toplevel_window(wid):
         return False
 
@@ -753,11 +998,10 @@ def get_all_managed_windows():
 
 
 def find_target_window(window_id_arg="", caller_pid=None, project_hint="", caller_tty="", terminal_screen="", session_id=""):
+    """Finds the exact window ID for the application (VS Code or Terminal)
+    that triggered the notification based on verified identity.
     """
-    Finds the exact window ID for the application (VS Code or Terminal)
-    that triggered the notification with 100% precision.
-    """
-    # 0. Tier 0: Check session cache if session_id is provided
+    # 0. Tier 0: Check validated session cache if session_id is provided
     if session_id:
         cached_wid = get_session_window(session_id)
         if cached_wid and is_developer_window(cached_wid):
@@ -767,48 +1011,72 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
     managed_windows = get_all_managed_windows()
 
     # 1. Tier 1: Match by PID tree + project_hint
-    if caller_pid:
-        pid_tree = get_process_ancestors(caller_pid)
-        tree_windows = [(wid, name) for wid, name, wpid in managed_windows if wpid in pid_tree and is_developer_window(wid)]
-        if tree_windows:
-            if project_hint:
-                for wid, name in tree_windows:
-                    if project_hint in name.lower():
-                        if session_id:
-                            save_session_window(session_id, wid, project_hint, caller_pid)
-                        return wid
+    c_pid = int(caller_pid or 0)
+    if c_pid > 1:
+        pid_tree = get_process_ancestors(c_pid)
+        tree_windows = [(wid, name, wpid) for wid, name, wpid in managed_windows if wpid in pid_tree and is_developer_window(wid)]
+        if len(tree_windows) == 1:
             wid = tree_windows[0][0]
             if session_id:
-                save_session_window(session_id, wid, project_hint, caller_pid)
+                save_session_window(session_id, wid, project_hint, tree_windows[0][2], precision="window")
             return wid
+        elif len(tree_windows) > 1:
+            if project_hint:
+                hint_matched = [w for w in tree_windows if project_hint in w[1].lower()]
+                if len(hint_matched) == 1:
+                    wid = hint_matched[0][0]
+                    if session_id:
+                        save_session_window(session_id, wid, project_hint, hint_matched[0][2], precision="window")
+                    return wid
+            # Multiple windows in same PID tree and no unique project hint: Ambiguous!
+            # If explicit window_id_arg is valid and belongs to tree_windows, use it
+            if window_id_arg and str(window_id_arg).strip().isdigit():
+                wid_arg_str = str(window_id_arg).strip()
+                if any(w[0] == wid_arg_str for w in tree_windows):
+                    if session_id:
+                        save_session_window(session_id, wid_arg_str, project_hint, c_pid, precision="window")
+                    return wid_arg_str
+            # Do NOT guess tree_windows[0][0]
+            return ""
 
     # 2. Tier 2: Match project_hint in window title across open developer windows
     if project_hint:
-        for wid, name, wpid in managed_windows:
-            if project_hint in name.lower():
-                if session_id:
-                    save_session_window(session_id, wid, project_hint, wpid)
-                return wid
+        matching_hint = [(wid, name, wpid) for wid, name, wpid in managed_windows if project_hint in name.lower()]
+        if len(matching_hint) == 1:
+            wid = matching_hint[0][0]
+            if session_id:
+                save_session_window(session_id, wid, project_hint, matching_hint[0][2], precision="app")
+            return wid
+        elif len(matching_hint) > 1:
+            # Multiple developer windows match project_hint: Ambiguous! Do not guess
+            pass
 
-    # 3. Tier 3: Match window from TTY (Linux only)
-    if not IS_WINDOWS and caller_tty:
-        pass
-
-    # 4. Tier 4: Explicit window_id_arg if valid
+    # 3. Tier 3: Explicit window_id_arg if valid
     if window_id_arg and str(window_id_arg).strip().isdigit():
         wid = str(window_id_arg).strip()
-        if is_developer_window(wid):
-            if session_id:
-                save_session_window(session_id, wid, project_hint, caller_pid)
-            return wid
+        if is_valid_toplevel_window(wid) and is_developer_window(wid):
+            if c_pid > 1:
+                wpid = get_window_pid(wid)
+                if wpid > 1 and not is_pid_in_ancestry(wpid, c_pid):
+                    # Belongs to a different process outside agent ancestry
+                    pass
+                else:
+                    if session_id:
+                        save_session_window(session_id, wid, project_hint, c_pid, precision="window")
+                    return wid
+            else:
+                if session_id:
+                    save_session_window(session_id, wid, project_hint, c_pid, precision="app")
+                return wid
 
-    # 5. Tier 5: Fallback to current active window
-    active_wid = get_current_active_window()
-    if active_wid and is_developer_window(active_wid):
+    # Tier 4: Wayland Native GNOME Terminal resolution via process ancestry
+    if c_pid > 1 and is_gnome_terminal_in_ancestry(c_pid):
+        wid = "wayland:gnome-terminal"
         if session_id:
-            save_session_window(session_id, active_wid, project_hint, caller_pid)
-        return active_wid
+            save_session_window(session_id, wid, project_hint, c_pid, precision="app", app_hint="gnome-terminal")
+        return wid
 
+    # Tier 5: Do NOT fall back to arbitrary active window or random developer windows
     return ""
 
 
@@ -851,34 +1119,16 @@ def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hin
             return True
 
     # 3. Match PID tree
-    if caller_pid and int(caller_pid) > 0:
-        try:
-            if IS_WINDOWS:
-                pid = wintypes.DWORD()
-                ctypes.windll.user32.GetWindowThreadProcessId(int(active_wid_str), ctypes.byref(pid))
-                wpid = pid.value
-                if wpid and wpid in get_process_ancestors(caller_pid):
+    c_pid = int(caller_pid or 0)
+    if c_pid > 1:
+        wpid = get_window_pid(active_wid_str)
+        if wpid > 1 and is_pid_in_ancestry(wpid, c_pid):
+            if project_hint:
+                title = find_window_title(active_wid_str)
+                if project_hint in title or is_developer_window(active_wid_str):
                     return True
             else:
-                wpid_str = subprocess.check_output(["xdotool", "getwindowpid", active_wid_str], stderr=subprocess.DEVNULL).decode().strip()
-                if wpid_str.isdigit():
-                    wpid = int(wpid_str)
-                    pid_tree = get_process_ancestors(caller_pid)
-                    if wpid in pid_tree:
-                        return True
-        except Exception:
-            pass
-
-    # 4. Match project hint in active window title
-    if project_hint and str(project_hint).strip():
-        try:
-            if is_developer_window(active_wid_str):
-                active_title = find_window_title(active_wid_str)
-                hint = str(project_hint).strip().lower()
-                if hint and hint in active_title:
-                    return True
-        except Exception:
-            pass
+                return True
 
     return False
 
@@ -956,12 +1206,17 @@ def switch_to_window_workspace(wid):
     return True
 
 
-def focus_target_window(window_id):
-    """Activates and brings to front the specified target window ID."""
+def focus_target_window(window_id, verify_timeout=0.4):
+    """Activates and brings to front the specified target window ID.
+    Returns True if focus activation was successfully verified, False otherwise.
+    """
     if not window_id:
         return False
 
     wid_str = str(window_id).strip()
+    if wid_str == "wayland:gnome-terminal":
+        return activate_gnome_terminal_via_dbus()
+
     if not wid_str.isdigit():
         return False
 
@@ -1001,14 +1256,24 @@ def focus_target_window(window_id):
                 user32.AttachThreadInput(fg_thread, target_thread, False)
             if attached_cur:
                 user32.AttachThreadInput(cur_thread, target_thread, False)
-            return True
+
+            # Verification loop
+            t_limit = time.monotonic() + verify_timeout
+            while time.monotonic() < t_limit:
+                if user32.GetForegroundWindow() == hwnd:
+                    return True
+                time.sleep(0.04)
+            return user32.GetForegroundWindow() == hwnd
         except Exception:
             return False
 
     # Linux implementation
     wid_int = int(wid_str)
+    if not is_valid_toplevel_window(wid_str):
+        return False
+
     switch_to_window_workspace(wid_str)
-    time.sleep(0.05)
+    time.sleep(0.04)
 
     try:
         import gi
@@ -1033,9 +1298,22 @@ def focus_target_window(window_id):
         subprocess.run(["xdotool", "windowactivate", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["xdotool", "windowraise", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["xdotool", "windowfocus", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
     except Exception:
-        return False
+        pass
+
+    # Verification loop
+    t_limit = time.monotonic() + verify_timeout
+    while time.monotonic() < t_limit:
+        act = get_current_active_window()
+        if act and str(act).strip() == wid_str:
+            return True
+        time.sleep(0.04)
+
+    act_final = get_current_active_window()
+    if act_final:
+        return str(act_final).strip() == wid_str
+    # On Wayland native where active window cannot be polled by client, return window validity
+    return is_valid_toplevel_window(wid_str)
 
 
 def focus_active_or_queued_notification():
@@ -1058,19 +1336,26 @@ def focus_active_or_queued_notification():
                     session_id=item.get("session_id", ""),
                 )
             if wid and is_valid_toplevel_window(wid):
-                remove_from_queue(k)
                 kill_previous_instance()
-                focus_target_window(wid)
-                pop_next_notification_async(exclude_key=k)
-                return 0
-            else:
-                remove_from_queue(k)
+                if focus_target_window(wid):
+                    remove_from_queue(k)
+                    pop_next_notification_async(exclude_key=k)
+                    return 0
+                else:
+                    # Focus failed: preserve in queue, try next
+                    continue
+            elif is_gnome_terminal_in_ancestry(item.get("caller_pid", 0)):
+                kill_previous_instance()
+                if activate_gnome_terminal_via_dbus():
+                    remove_from_queue(k)
+                    pop_next_notification_async(exclude_key=k)
+                    return 0
 
     # Fallback if queue is empty: check session cache
     if os.path.exists(SESSION_CACHE_FILE):
         try:
-            with open(SESSION_CACHE_FILE, "r") as f:
-                sessions = json.load(f)
+            with file_lock(SESSION_LOCK_FILE, timeout=0.5):
+                sessions = safe_load_json(SESSION_CACHE_FILE, default={})
             valid_sessions = []
             for sid, sinfo in sessions.items():
                 if isinstance(sinfo, dict) and sinfo.get("window_id"):
@@ -1079,18 +1364,12 @@ def focus_active_or_queued_notification():
             for _, wid in valid_sessions:
                 if is_valid_toplevel_window(wid):
                     kill_previous_instance()
-                    focus_target_window(wid)
-                    return 0
+                    if focus_target_window(wid):
+                        return 0
         except Exception:
             pass
 
-    # Final fallback: try to find any active developer window
-    managed = get_all_managed_windows()
-    for wid, name, _ in managed:
-        if any(dev in name.lower() for dev in ["visual studio code", "code", "terminal", "alacritty", "kitty", "cursor"]):
-            focus_target_window(wid)
-            return 0
-
+    # Never focus random developer windows when ambiguous
     return 1
 
 
@@ -1237,7 +1516,6 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
     def handle_focus_and_close(event=None):
         if closing[0]:
             return
-        closing[0] = True
 
         wid_to_focus = target_window_id
         if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
@@ -1247,10 +1525,12 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                 project_hint=project_hint,
                 session_id=session_id,
             )
+        focused = False
         if wid_to_focus:
-            focus_target_window(wid_to_focus)
+            focused = focus_target_window(wid_to_focus)
 
-        if queue_key:
+        closing[0] = True
+        if focused and queue_key:
             remove_from_queue(queue_key)
 
         pop_next_notification_async(exclude_key=queue_key)
@@ -1290,6 +1570,14 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=border_color)
+        try:
+            GWL_EXSTYLE = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            hwnd = int(win.winfo_id())
+            cur_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, cur_style | WS_EX_NOACTIVATE)
+        except Exception:
+            pass
 
         inner = tk.Frame(win, bg=bg_color, padx=14, pady=10)
         inner.pack(fill=tk.BOTH, expand=True, padx=1.5, pady=1.5)
@@ -1385,7 +1673,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                 project_hint=project_hint,
                 session_id=session_id,
             ):
-                now = time.time()
+                now = time.monotonic()
                 if active_since[0] is None:
                     active_since[0] = now
                 elif (now - active_since[0]) >= auto_dismiss_delay:
@@ -1404,6 +1692,73 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
     root.mainloop()
 
 
+def should_use_x11_overlay(environ=None):
+    """Determines if Linux notification overlay should use X11/XWayland backend.
+
+    Wayland native compositors (such as GNOME Mutter) do not permit client-driven
+    window positioning for toplevel surfaces, causing multi-monitor popups to stack/cascade
+    on a single display. Using XWayland (when DISPLAY is present in a Wayland session)
+    enables precise multi-monitor placement across connected screens.
+    """
+    if environ is None:
+        environ = os.environ
+
+    # Explicit override via NOTIFY_BACKEND takes highest precedence
+    notify_backend = environ.get("NOTIFY_BACKEND", "").strip().lower()
+    if notify_backend == "wayland":
+        return False
+    if notify_backend in ("x11", "xwayland"):
+        return True
+
+    # Explicit opt-out from XWayland overlay
+    if environ.get("NOTIFY_FORCE_WAYLAND") == "1":
+        return False
+
+    # In a Wayland session, if XWayland DISPLAY is available, use X11 backend for the overlay
+    # to achieve proper multi-monitor placement, even if the ambient environment has GDK_BACKEND=wayland.
+    is_wayland_session = bool(
+        environ.get("WAYLAND_DISPLAY") or
+        environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+    )
+    has_x11_display = bool(environ.get("DISPLAY"))
+
+    return is_wayland_session and has_x11_display
+
+
+def calculate_overlay_placement(geo_dict, win_width, win_height=0, top_margin=30):
+    """Calculates (x, y) coordinates to center an overlay window horizontally
+    near the top of the given monitor area.
+
+    geo_dict: dict with 'x', 'y', 'width', 'height'.
+    Supports negative coordinates, portrait monitors, and work area offsets.
+    """
+    x = int(geo_dict.get("x", 0))
+    y = int(geo_dict.get("y", 0))
+    width = int(geo_dict.get("width", 1920))
+
+    if width > win_width:
+        win_x = x + (width - win_width) // 2
+    else:
+        win_x = x
+
+    win_y = y + top_margin
+    return win_x, win_y
+
+
+def get_target_monitor_indices(n_monitors, can_place_windows):
+    """Determines the list of monitor indices to display popups on.
+
+    When client-side placement is supported (X11 / XWayland), returns all monitor indices.
+    When client-side placement is not supported (pure Wayland), returns [0] to avoid
+    creating multiple toplevel windows that compositor cascades onto a single monitor.
+    """
+    if n_monitors <= 0:
+        return []
+    if not can_place_windows and n_monitors > 1:
+        return [0]
+    return list(range(n_monitors))
+
+
 # ---------------------------------------------------------------------------
 # Linux Multi-Monitor Overlay (GTK3 / GDK)
 # ---------------------------------------------------------------------------
@@ -1415,6 +1770,11 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
         send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
         return
 
+    # Prefer X11/XWayland backend if in a Wayland session with DISPLAY available
+    # to allow accurate multi-monitor window positioning across all screens.
+    if should_use_x11_overlay():
+        os.environ["GDK_BACKEND"] = "x11"
+
     try:
         import gi
         gi.require_version("Gdk", "3.0")
@@ -1425,12 +1785,39 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
         send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
         return
 
+    init_ok = False
+    try:
+        init_ok = bool(Gtk.init_check()[0])
+    except Exception:
+        init_ok = False
+
+    if not init_ok:
+        if os.environ.get("GDK_BACKEND") == "x11" and os.environ.get("WAYLAND_DISPLAY"):
+            os.environ.pop("GDK_BACKEND", None)
+            try:
+                init_ok = bool(Gtk.init_check()[0])
+            except Exception:
+                init_ok = False
+
+    if not init_ok:
+        send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
+        return
+
     try:
         display = Gdk.Display.get_default()
         if not display:
             send_fallback_notify(app_name, title, display_text or "AI Agent đang chờ bạn.", urgency="normal", timeout=timeout)
             return
+
+        display_type = type(display).__name__
+        can_place_windows = "Wayland" not in display_type
+
         n_monitors = display.get_n_monitors()
+        target_monitors = get_target_monitor_indices(n_monitors, can_place_windows)
+
+        is_debug = os.environ.get("DEBUG_NOTIFY") == "1"
+        if is_debug:
+            print(f"[multi-desktop-notify] display={display_type}, can_place={can_place_windows}, target_monitors={target_monitors}/{n_monitors}")
 
         bg_color = "#18181b"
         border_color = "#3b82f6"
@@ -1531,7 +1918,6 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
         def handle_focus_and_close():
             if closing[0]:
                 return
-            closing[0] = True
 
             wid_to_focus = target_window_id
             if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
@@ -1541,10 +1927,13 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     project_hint=project_hint,
                     session_id=session_id,
                 )
-            if wid_to_focus:
-                focus_target_window(wid_to_focus)
 
-            if queue_key:
+            focused = False
+            if wid_to_focus:
+                focused = focus_target_window(wid_to_focus)
+
+            closing[0] = True
+            if focused and queue_key:
                 remove_from_queue(queue_key)
 
             pop_next_notification_async(exclude_key=queue_key)
@@ -1575,16 +1964,27 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
 
             GLib.timeout_add(60, Gtk.main_quit)
 
-        for i in range(n_monitors):
+        for i in target_monitors:
             monitor = display.get_monitor(i)
+            work = monitor.get_workarea()
             geom = monitor.get_geometry()
 
-            win_width = int(min(560, max(460, geom.width * 0.30)))
+            base_area = work if (work.width > 0 and work.height > 0) else geom
+            geo_dict = {
+                "x": base_area.x,
+                "y": base_area.y,
+                "width": base_area.width,
+                "height": base_area.height,
+            }
+
+            win_width = int(min(560, max(460, geo_dict["width"] * 0.30)))
 
             win = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
             win.set_decorated(False)
             win.get_style_context().add_class("notification-window")
             win.set_app_paintable(True)
+            win.set_accept_focus(False)
+            win.set_focus_on_map(False)
             screen = win.get_screen()
             if screen:
                 visual = screen.get_rgba_visual()
@@ -1687,12 +2087,13 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
             win.set_size_request(win_width, -1)
             win.set_default_size(win_width, -1)
 
-            def on_size_allocate(w, alloc, gx, gw, gy):
-                win_x = gx + (gw - alloc.width) // 2
-                win_y = gy + 30
+            def on_size_allocate(w, alloc, g_dict, mon_idx):
+                win_x, win_y = calculate_overlay_placement(g_dict, alloc.width, alloc.height, top_margin=30)
                 w.move(win_x, win_y)
+                if is_debug:
+                    print(f"[multi-desktop-notify] win mon={mon_idx} placed at ({win_x}, {win_y})")
 
-            win.connect("size-allocate", lambda w, alloc, gx=geom.x, gw=geom.width, gy=geom.y: on_size_allocate(w, alloc, gx, gw, gy))
+            win.connect("size-allocate", lambda w, alloc, gd=geo_dict, idx=i: on_size_allocate(w, alloc, gd, idx))
 
             def on_key_press(w, event):
                 if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space, Gdk.KEY_f, Gdk.KEY_F, Gdk.KEY_y, Gdk.KEY_Y):
@@ -1732,7 +2133,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     project_hint=project_hint,
                     session_id=session_id,
                 ):
-                    now = time.time()
+                    now = time.monotonic()
                     if active_since[0] is None:
                         active_since[0] = now
                     elif (now - active_since[0]) >= auto_dismiss_delay:
@@ -1856,16 +2257,35 @@ def main():
 
     # 1. Session capture mode
     if args.capture_session:
-        target_wid = find_target_window(
-            window_id_arg=args.window_id,
-            caller_pid=args.caller_pid,
-            project_hint=args.project_hint,
-            caller_tty=args.caller_tty,
-            terminal_screen=getattr(args, "terminal_screen", ""),
-            session_id=args.session_id,
-        )
+        target_wid = ""
+        c_pid = int(args.caller_pid or 0)
+        w_arg = str(args.window_id or "").strip()
+        if w_arg and is_valid_toplevel_window(w_arg) and is_developer_window(w_arg):
+            if c_pid > 1:
+                wpid = get_window_pid(w_arg)
+                if wpid > 1 and is_pid_in_ancestry(wpid, c_pid):
+                    target_wid = w_arg
+            else:
+                target_wid = w_arg
+
+        if not target_wid:
+            target_wid = find_target_window(
+                window_id_arg=args.window_id,
+                caller_pid=args.caller_pid,
+                project_hint=args.project_hint,
+                caller_tty=args.caller_tty,
+                terminal_screen=getattr(args, "terminal_screen", ""),
+                session_id=args.session_id,
+            )
+
         if target_wid and args.session_id:
-            save_session_window(args.session_id, target_wid, args.project_hint, args.caller_pid)
+            save_session_window(
+                session_id=args.session_id,
+                window_id=target_wid,
+                project_hint=args.project_hint,
+                pid=args.caller_pid,
+                precision="window",
+            )
         return
 
     message = clean_text(args.message)

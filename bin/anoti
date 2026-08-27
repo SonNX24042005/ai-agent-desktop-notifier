@@ -51,13 +51,37 @@ def cmd_test(title="Kiểm tra thông báo", message="Hệ thống thông báo h
         print("[HINT] Chay 'anoti install' de cai dat.")
         return 1
 
+    caller_pid = os.getppid() if hasattr(os, "getppid") else os.getpid()
+    caller_win = ""
+    if not IS_WINDOWS:
+        try:
+            caller_win = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            caller_win = ""
+    else:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                caller_win = str(hwnd)
+        except Exception:
+            caller_win = ""
+
+    project_hint = os.path.basename(os.getcwd().rstrip("/\\")) if os.getcwd() not in ["/", "\\"] else ""
+    session_id = f"anoti-test-{os.getpid()}"
+
     cmd = [
         sys.executable,
         str(NOTIFIER_PY),
         "--app-name=AI Agent Notifier",
         f"--title={title}",
         f"--message={message}",
-        "--timeout=4",
+        f"--window-id={caller_win}",
+        f"--caller-pid={caller_pid}",
+        f"--project-hint={project_hint}",
+        f"--session-id={session_id}",
+        "--timeout=10",
+        "--auto-dismiss-delay=1.5",
     ]
     if not IS_WINDOWS:
         cmd.append("--sound=/usr/share/sounds/freedesktop/stereo/complete.oga")

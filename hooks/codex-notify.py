@@ -136,6 +136,23 @@ def handle_hook(payload):
     event = payload.get("hook_event_name") or payload.get("type")
     session_id = payload.get("session_id") or payload.get("thread_id") or payload.get("turn_id") or ""
 
+    if event in ("SessionStart", "session_start"):
+        if os.path.exists(MULTI_NOTIFY) and session_id:
+            caller_win = get_active_window_id()
+            caller_pid = os.getppid() if hasattr(os, "getppid") else 0
+            project_hint = os.path.basename(os.getcwd().rstrip("/\\")) if os.getcwd() not in ["/", "\\"] else ""
+            cmd = [
+                PYTHON3, MULTI_NOTIFY,
+                "--capture-session",
+                f"--session-id={session_id}",
+                f"--window-id={caller_win}",
+                f"--caller-pid={caller_pid}",
+                f"--project-hint={project_hint}",
+            ]
+            creationflags = 0x08000000 if IS_WINDOWS else 0
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
+        return
+
     if event == "PermissionRequest":
         tool_name = payload.get("tool_name") or "công cụ"
         tool_input = payload.get("tool_input") or {}

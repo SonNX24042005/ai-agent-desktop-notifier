@@ -153,6 +153,8 @@ curl -fsSL https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-noti
 
 ## Cấu trúc thư mục dự án
 
+Tài liệu dành cho người phát triển và coding agent: [Thiết kế kiến trúc](docs/architecture.md).
+
 ```
 ai-agent-desktop-notifier/
 ├── bin/
@@ -161,6 +163,7 @@ ai-agent-desktop-notifier/
 │   ├── anoti.ps1                 # Wrapper cho PowerShell
 │   └── multi-desktop-notify.py   # Engine popup đa màn hình, toast và focus cửa sổ
 ├── docs/
+│   ├── architecture.md           # Thiết kế kiến trúc và hướng dẫn mở rộng
 │   └── windows-guide.md          # Hướng dẫn chi tiết cho người dùng Windows
 ├── hooks/
 │   ├── claude-notify.py          # Script xử lý hook vòng đời Claude Code (đa nền tảng)
