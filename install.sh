@@ -76,7 +76,7 @@ if [ -f "$SCRIPT_DIR/bin/anoti" ]; then
 fi
 
 echo "=== 4. Merging configuration files safely ==="
-python3 -c '
+python3 << 'EOF'
 import json, os
 
 USER_HOME = os.environ.get("HOME") or os.path.expanduser("~")
@@ -242,7 +242,7 @@ try:
     print("✓ Registered Alt+Q global shortcut for anoti focus")
 except Exception:
     pass
-'
+EOF
 
 echo "=== 5. Installation Complete! ==="
 echo "Testing desktop notification on all screens..."

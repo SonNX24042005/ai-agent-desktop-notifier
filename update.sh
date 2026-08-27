@@ -52,7 +52,7 @@ if [ -f "$SCRIPT_DIR/bin/anoti" ]; then
 fi
 
 echo "=== 3. Syncing configuration files safely ==="
-python3 -c '
+python3 << 'EOF'
 import json, os
 
 USER_HOME = os.environ.get("HOME") or os.path.expanduser("~")
@@ -231,7 +231,7 @@ try:
     print("✓ Synced Alt+Q global shortcut for anoti focus")
 except Exception:
     pass
-'
+EOF
 
 echo "=== 4. Update Complete! ==="
 "$LOCAL_BIN/multi-desktop-notify.py" \

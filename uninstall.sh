@@ -11,26 +11,12 @@ GEMINI_HOOKS="$USER_HOME/.gemini/hooks"
 
 echo "=== 1. Restoring configuration backups & removing hooks ==="
 
-python3 -c '
-import json, os, shutil
+python3 << 'EOF'
+import json, os, shutil, subprocess, ast
 
 USER_HOME = os.environ.get("HOME") or os.path.expanduser("~")
 
-# 1. Restore .bak files if they exist
-paths_to_restore = [
-    os.path.join(USER_HOME, ".claude", "settings.json"),
-    os.path.join(USER_HOME, ".codex", "config.toml"),
-    os.path.join(USER_HOME, ".codex", "hooks.json"),
-    os.path.join(USER_HOME, ".gemini", "config", "hooks.json"),
-]
-
-for p in paths_to_restore:
-    bak = p + ".bak"
-    if os.path.exists(bak):
-        shutil.copyfile(bak, p)
-        print(f"✓ Restored {p} from backup {bak}")
-
-# 2. Clean up Claude hooks if still present
+# 1. Clean up Claude hooks
 claude_path = os.path.join(USER_HOME, ".claude", "settings.json")
 if os.path.exists(claude_path):
     try:
@@ -44,7 +30,7 @@ if os.path.exists(claude_path):
     except Exception:
         pass
 
-# 3. Clean up Antigravity hooks (settings.json & hooks.json)
+# 2. Clean up Antigravity hooks (settings.json & hooks.json)
 gemini_settings_file = os.path.join(USER_HOME, ".gemini", "settings.json")
 if os.path.exists(gemini_settings_file):
     try:
@@ -71,7 +57,7 @@ if os.path.exists(gemini_hooks_file):
     except Exception:
         pass
 
-# 4. Clean up Codex config.toml
+# 3. Clean up Codex config.toml
 codex_cfg = os.path.join(USER_HOME, ".codex", "config.toml")
 if os.path.exists(codex_cfg):
     try:
@@ -84,7 +70,7 @@ if os.path.exists(codex_cfg):
     except Exception:
         pass
 
-# 5. Clean up Codex hooks.json
+# 4. Clean up Codex hooks.json
 codex_hooks = os.path.join(USER_HOME, ".codex", "hooks.json")
 if os.path.exists(codex_hooks):
     try:
@@ -98,9 +84,8 @@ if os.path.exists(codex_hooks):
     except Exception:
         pass
 
-# 6. Clean up GNOME global shortcut and restore default window menu
+# 5. Clean up GNOME global shortcut and restore default window menu
 try:
-    import subprocess, ast
     target_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/anoti-focus/"
     subprocess.run(["gsettings", "set", "org.gnome.desktop.wm.keybindings", "activate-window-menu", "['<Alt>space']"], check=False)
     out = subprocess.check_output(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys", "custom-keybindings"], stderr=subprocess.DEVNULL).decode().strip()
@@ -112,7 +97,7 @@ try:
         print("✓ Removed Alt+Q global shortcut")
 except Exception:
     pass
-'
+EOF
 
 echo "=== 2. Removing notification scripts & caches ==="
 rm -f "$LOCAL_BIN/multi-desktop-notify.py"
