@@ -13,7 +13,7 @@ Hệ thống thông báo nổi đa màn hình (multi-monitor desktop notificatio
 - **Tự động chuyển workspace và focus cửa sổ thông minh (5 tầng nhận diện)**:
   - **Tự động chuyển đúng không gian làm việc (workspace)**: Nhận diện không gian làm việc chứa cửa sổ ứng dụng và tự động chuyển màn hình sang đúng workspace đó trước khi kích hoạt cửa sổ (Linux).
   - **Bỏ qua giới hạn foreground lock (Windows)**: Sử dụng kỹ thuật `AttachThreadInput` và `SetForegroundWindow` của Win32 API để đưa cửa sổ IDE/terminal lên đầu màn hình ngay lập tức mà không bị hiện tượng nhấp nháy thanh tác vụ.
-  - **Tầng 1 (Session cache)**: Tra cứu ID cửa sổ đã lưu từ đầu phiên (`SessionStart`/`PreInvocation`) kèm kiểm tra tính hợp lệ và PID để tránh dùng lại ID cũ.
+  - **Tầng 1 (Session cache)**: Tra cứu ID cửa sổ đã lưu từ đầu phiên (`SessionStart`/`PreInvocation`) kèm kiểm tra tính hợp lệ và PID sở hữu cửa sổ để tránh dùng lại ID cũ. PID cửa sổ được lưu riêng với PID ngắn hạn của hook, nên nút đến cửa sổ, tự động đóng và `Alt+Q` vẫn hoạt động sau khi hook kết thúc trên X11.
   - **Tầng 2 (Cây tiến trình PID)**: Lần ngược cây PID cha (`/proc/{pid}/stat` trên Linux hoặc Win32 Toolhelp snapshot trên Windows) kết hợp tên thư mục dự án để tìm cửa sổ terminal/IDE tương ứng.
   - **Tầng 3 (Window ID trực tiếp)**: Xác thực ID cửa sổ được truyền trực tiếp qua tham số `--window-id` (phải là cửa sổ nhà phát triển hợp lệ).
   - **Tầng 4 (Cửa sổ đang hoạt động)**: Lấy cửa sổ foreground hiện tại nếu là cửa sổ nhà phát triển phù hợp.

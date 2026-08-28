@@ -380,7 +380,7 @@ def prune_sessions(sessions, now=None, max_entries=FOCUS_MAX_ENTRIES, max_age=FO
 
 
 # ---------------------------------------------------------------------------
-# Session Cache & Window Identity Store (Schema v2)
+# Session Cache & Window Identity Store (Schema v3)
 # ---------------------------------------------------------------------------
 def save_session_window(session_id, window_id, project_hint="", pid=0, precision="window", app_hint="", title_fingerprint=""):
     """Caches target window identity for a session ID with lock, atomic write, and cache protection."""
@@ -390,11 +390,8 @@ def save_session_window(session_id, window_id, project_hint="", pid=0, precision
     if not is_developer_window(wid_str):
         return False
 
-    c_pid = int(pid or 0)
-    if c_pid > 1:
-        wpid = get_window_pid(wid_str)
-        if wpid > 1 and not is_pid_in_ancestry(wpid, c_pid) and not is_developer_window(wid_str):
-            return False
+    caller_pid = int(pid or 0)
+    window_pid = get_window_pid(wid_str)
 
     fingerprint = str(title_fingerprint or "").strip()
     if not fingerprint:
@@ -419,12 +416,15 @@ def save_session_window(session_id, window_id, project_hint="", pid=0, precision
             pass
 
         sessions[str(session_id)] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "session_id": str(session_id),
             "window_id": wid_str,
             "window_id_dec": dec_wid,
             "project_hint": str(project_hint or "").strip(),
-            "pid": c_pid,
+            # Keep pid as the window owner for readers predating schema v3.
+            "pid": int(window_pid or caller_pid),
+            "window_pid": int(window_pid or 0),
+            "caller_pid": caller_pid,
             "app_hint": str(app_hint or "").strip(),
             "title_fingerprint": fingerprint,
             "precision": precision,
@@ -446,7 +446,7 @@ def get_session_window_info(session_id):
         if isinstance(entry, dict):
             return entry
         elif isinstance(entry, str) and entry.strip():
-            return {"window_id": entry.strip(), "precision": "window", "schema_version": 2}
+            return {"window_id": entry.strip(), "precision": "window", "schema_version": 3}
     return None
 
 
@@ -466,10 +466,18 @@ def get_session_window(session_id):
         return ""
 
     # Stale handle / PID verification
-    cached_pid = int(info.get("pid", 0))
-    if cached_pid > 0:
+    schema_version = int(info.get("schema_version", 0) or 0)
+    has_explicit_window_pid = "window_pid" in info
+    cached_window_pid = int(info.get("window_pid", 0) or 0)
+    if not has_explicit_window_pid:
+        # Schema v2 capture entries stored the short-lived hook caller in pid.
+        # app_hint was only attached by capture mode, so do not mistake that PID
+        # for the owner of an otherwise verified X11 window.
+        if not (schema_version <= 2 and info.get("app_hint")):
+            cached_window_pid = int(info.get("pid", 0) or 0)
+    if cached_window_pid > 0:
         cur_pid = get_window_pid(wid)
-        if cur_pid > 0 and cur_pid != cached_pid:
+        if cur_pid > 0 and cur_pid != cached_window_pid:
             # PID mismatch: window ID reused by OS for another process
             return ""
 
@@ -1209,7 +1217,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
         if len(tree_windows) == 1:
             wid = tree_windows[0][0]
             if session_id:
-                save_session_window(session_id, wid, project_hint, tree_windows[0][2], precision="window")
+                save_session_window(session_id, wid, project_hint, c_pid, precision="window")
             return wid
         elif len(tree_windows) > 1:
             if project_hint:
@@ -1217,7 +1225,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
                 if len(hint_matched) == 1:
                     wid = hint_matched[0][0]
                     if session_id:
-                        save_session_window(session_id, wid, project_hint, hint_matched[0][2], precision="window")
+                        save_session_window(session_id, wid, project_hint, c_pid, precision="window")
                     return wid
             # Multiple windows in same PID tree and no unique project hint: Ambiguous!
             # If explicit window_id_arg is valid and belongs to tree_windows, use it
@@ -1236,7 +1244,7 @@ def find_target_window(window_id_arg="", caller_pid=None, project_hint="", calle
         if len(matching_hint) == 1:
             wid = matching_hint[0][0]
             if session_id:
-                save_session_window(session_id, wid, project_hint, matching_hint[0][2], precision="app")
+                save_session_window(session_id, wid, project_hint, c_pid, precision="app")
             return wid
         elif len(matching_hint) > 1:
             # Multiple developer windows match project_hint: Ambiguous! Do not guess
@@ -2085,7 +2093,7 @@ def focus_active_or_queued_notification():
             for _, sid, sinfo in valid_sessions:
                 if focus_target_window(
                     sinfo.get("window_id", ""),
-                    caller_pid=sinfo.get("pid", 0),
+                    caller_pid=sinfo.get("caller_pid", sinfo.get("pid", 0)),
                     project_hint=sinfo.get("project_hint", ""),
                     session_id=sid,
                     app_hint=sinfo.get("app_hint", ""),

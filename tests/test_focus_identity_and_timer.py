@@ -147,14 +147,49 @@ class TestTargetWindowResolution(unittest.TestCase):
         wid = mdn.find_target_window(session_id="sess_001")
         self.assertEqual(wid, "12345")
 
-    @patch.object(mdn, "is_developer_window", return_value=True)
-    @patch.object(mdn, "is_valid_toplevel_window", return_value=True)
-    @patch.object(mdn, "get_window_pid", return_value=9999)  # PID changed! (Handle reused)
-    def test_stale_handle_pid_mismatch(self, mock_pid, mock_valid, mock_dev):
-        mdn.save_session_window("sess_002", "12345", project_hint="proj", pid=1234, precision="window")
-        # Cached PID is 1234, but current window owner is 9999
-        wid = mdn.get_session_window("sess_002")
+    def test_stale_handle_pid_mismatch(self):
+        with patch.object(mdn, "is_developer_window", return_value=True), \
+             patch.object(mdn, "is_valid_toplevel_window", return_value=True), \
+             patch.object(mdn, "get_window_pid", side_effect=[1234, 9999]):
+            mdn.save_session_window("sess_002", "12345", project_hint="proj", pid=1234, precision="window")
+            # Window owner changed after capture: the handle was reused.
+            wid = mdn.get_session_window("sess_002")
         self.assertEqual(wid, "")
+
+    def test_schema_v2_capture_pid_is_not_treated_as_window_owner(self):
+        mdn.atomic_write_json(mdn.SESSION_CACHE_FILE, {
+            "sess_legacy": {
+                "schema_version": 2,
+                "window_id": "44040202",
+                "pid": 164327,
+                "app_hint": "Antigravity",
+                "project_hint": "samer",
+                "title_fingerprint": "samer@samer-loq: ~",
+                "precision": "window",
+            },
+        })
+        with patch.object(mdn, "is_valid_toplevel_window", return_value=True), \
+             patch.object(mdn, "is_developer_window", return_value=True), \
+             patch.object(mdn, "get_window_pid", return_value=163377), \
+             patch.object(mdn, "find_window_title", return_value="samer@samer-loq: ~"):
+            self.assertEqual(mdn.get_session_window("sess_legacy"), "44040202")
+
+    def test_schema_v3_missing_window_owner_does_not_reuse_caller_pid(self):
+        mdn.atomic_write_json(mdn.SESSION_CACHE_FILE, {
+            "sess_v3": {
+                "schema_version": 3,
+                "window_id": "44040202",
+                "pid": 164327,
+                "window_pid": 0,
+                "caller_pid": 164327,
+                "app_hint": "Antigravity",
+                "precision": "window",
+            },
+        })
+        with patch.object(mdn, "is_valid_toplevel_window", return_value=True), \
+             patch.object(mdn, "is_developer_window", return_value=True), \
+             patch.object(mdn, "get_window_pid", return_value=163377):
+            self.assertEqual(mdn.get_session_window("sess_v3"), "44040202")
 
     @patch.object(mdn, "is_developer_window", return_value=True)
     @patch.object(mdn, "is_valid_toplevel_window", return_value=True)
@@ -543,7 +578,7 @@ class TestTitleFingerprint(unittest.TestCase):
 
 
 class TestGenerationAndState(unittest.TestCase):
-    """Tests for monotonic generation counter and schema v2 integrity."""
+    """Tests for monotonic generation counter and schema v3 integrity."""
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
@@ -561,14 +596,18 @@ class TestGenerationAndState(unittest.TestCase):
         self.assertGreater(g2, g1)
         self.assertGreater(g3, g2)
 
-    def test_schema_v2_stored(self):
-        with patch.object(mdn, "is_developer_window", return_value=True):
+    def test_schema_v3_stores_window_and_caller_pid(self):
+        with patch.object(mdn, "is_developer_window", return_value=True), \
+             patch.object(mdn, "get_window_pid", return_value=90):
             mdn.SESSION_CACHE_FILE = os.path.join(self.tmp_dir.name, "sessions.json")
             mdn.SESSION_LOCK_FILE = os.path.join(self.tmp_dir.name, "sessions.lock")
-            mdn.save_session_window("sess_v2", "12345", project_hint="my-proj", pid=100)
-            info = mdn.get_session_window_info("sess_v2")
-            self.assertEqual(info.get("schema_version"), 2)
+            mdn.save_session_window("sess_v3", "12345", project_hint="my-proj", pid=100)
+            info = mdn.get_session_window_info("sess_v3")
+            self.assertEqual(info.get("schema_version"), 3)
             self.assertEqual(info.get("window_id_dec"), "12345")
+            self.assertEqual(info.get("window_pid"), 90)
+            self.assertEqual(info.get("caller_pid"), 100)
+            self.assertEqual(info.get("pid"), 90)
             self.assertIn("captured_at", info)
 
 

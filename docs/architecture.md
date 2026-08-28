@@ -260,6 +260,8 @@ Trên Linux X11/XWayland, engine:
 - Gọi `gdk_win.focus()`, `wmctrl -i -a` và `xdotool windowactivate --sync`;
 - Kiểm tra lại active window trong tối đa khoảng 0,4 giây.
 
+Session cache schema v3 tách `window_pid` của cửa sổ X11 khỏi `caller_pid` của hook. Khi đọc cache schema v2 do capture hook tạo, engine không còn so PID ngắn hạn của hook với PID sở hữu cửa sổ. Nhờ đó nút đến cửa sổ, tự động đóng và `Alt+Q` vẫn nhận diện đúng cửa sổ sau khi hook đã kết thúc. Entry schema v3 có `window_pid=0` được hiểu là chưa biết PID cửa sổ và không dùng `caller_pid` thay thế.
+
 Trên GNOME Wayland native, engine không giả lập X11. `focus_wayland_target_window()` gửi identity gồm caller PID, project hint và title fingerprint qua D-Bus đến adapter GNOME Shell. Adapter chạy trong compositor, chỉ chấp nhận cửa sổ developer khớp duy nhất rồi gọi `Main.activateWindow()` để chuyển workspace và đưa cửa sổ lên foreground. Khi adapter trả về thành công, engine chấp nhận kết quả ngay vì việc chọn duy nhất và kích hoạt đã diễn ra trong compositor; engine không quét lại AT-SPI đồng bộ, tránh bị chặn bởi một accessibility client không phản hồi. Chỉ khi adapter thất bại, engine mới phân giải và thử fallback X11/XWayland. Nếu target mơ hồ hoặc focus thất bại, popup và queue item được giữ nguyên để người dùng thử lại.
 
 ## 9. Trạng thái và dữ liệu runtime
@@ -282,9 +284,13 @@ Thư mục runtime được cô lập an toàn: ưu tiên `$AI_AGENT_NOTIFIER_RU
 ```json
 {
   "session-id": {
+    "schema_version": 3,
     "window_id": "12345",
+    "window_id_dec": "12345",
     "project_hint": "project-name",
     "pid": 1234,
+    "window_pid": 1234,
+    "caller_pid": 5678,
     "app_hint": "",
     "title_fingerprint": "",
     "precision": "window",
@@ -294,7 +300,7 @@ Thư mục runtime được cô lập an toàn: ưu tiên `$AI_AGENT_NOTIFIER_RU
 }
 ```
 
-`precision="window"` không được ghi đè bằng identity độ chính xác thấp hơn. `window_id` cũng có thể là token `wayland:gnome-terminal`.
+Trong schema v3, `pid` giữ PID sở hữu cửa sổ để tương thích reader cũ; mã mới dùng rõ ràng `window_pid` và `caller_pid`. Reader vẫn chấp nhận schema v2, trong đó entry capture có `app_hint` được hiểu là đang lưu PID hook trong `pid`. `precision="window"` không được ghi đè bằng identity độ chính xác thấp hơn. `window_id` cũng có thể là token `wayland:gnome-terminal`.
 
 ### 9.3. Schema queue
 
