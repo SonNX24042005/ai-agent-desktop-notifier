@@ -179,6 +179,34 @@ class TestEventTypeContract(unittest.TestCase):
         self.assertFalse(mdn.is_boilerplate_message("Tôi đã tối ưu hóa thuật toán và cập nhật các unit test.", "tag-complete"))
         self.assertFalse(mdn.is_boilerplate_message("Bạn có muốn tiếp tục chạy bước 3 hay không?", "tag-question"))
 
+    def test_completion_notification_is_available_to_global_focus(self):
+        argv = [
+            str(SCRIPT_PATH),
+            "--app-name=Codex",
+            "--title=Codex: Hoàn thành",
+            "--message=Codex đã hoàn thành lượt làm việc.",
+            "--event-type=complete",
+            "--session-id=completion-session",
+            "--caller-pid=900",
+            "--project-hint=project",
+            "--dedupe-seconds=0",
+        ]
+
+        with patch.object(sys, "argv", argv), \
+             patch.object(mdn, "is_duplicate_notification", return_value=False), \
+             patch.object(mdn, "kill_previous_instance"), \
+             patch.object(mdn, "find_target_window", return_value=""), \
+             patch.object(mdn, "save_to_queue") as mock_save, \
+             patch.object(mdn, "dispatch_webhooks_async"), \
+             patch.object(mdn, "show_multi_monitor_popup"):
+            mdn.main()
+
+        self.assertEqual(mock_save.call_count, 1)
+        queue_key, item = mock_save.call_args.args
+        self.assertEqual(queue_key, "sess_completion-session")
+        self.assertEqual(item["event_type"], "complete")
+        self.assertEqual(item["project_hint"], "project")
+
 
 class TestStaleProjectHintValidation(unittest.TestCase):
     """Verifies LOG-004: Project hint check allows valid developer windows."""

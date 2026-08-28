@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -78,6 +79,7 @@ QUEUE_LOCK_FILE = os.path.join(RUNTIME_DIR, "ai_agent_notifier_queue.lock")
 CONFIG_FILE = os.path.expanduser("~/.config/ai-agent-notifier/config.json")
 FOCUS_MAX_ENTRIES = 64
 FOCUS_MAX_AGE = 86400  # 24 hours
+WINDOW_QUERY_TIMEOUT = 0.75
 
 # Ensure DISPLAY and XAUTHORITY are available in background hook processes on Linux
 if not IS_WINDOWS:
@@ -865,7 +867,11 @@ def is_valid_toplevel_window(wid):
             return False
 
     try:
-        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_STATE"], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xprop", "-id", wid_str, "_NET_WM_STATE"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         return "_NET_WM_STATE" in out and "not found" not in out
     except Exception:
         return False
@@ -892,7 +898,11 @@ def find_window_title(wid):
             return ""
 
     try:
-        return subprocess.check_output(["xdotool", "getwindowname", wid_str], stderr=subprocess.DEVNULL).decode().strip().lower()
+        return subprocess.check_output(
+            ["xdotool", "getwindowname", wid_str],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode().strip().lower()
     except Exception:
         return ""
 
@@ -947,13 +957,21 @@ def get_window_pid(wid):
         except Exception:
             return 0
     try:
-        wpid_str = subprocess.check_output(["xdotool", "getwindowpid", wid_str], stderr=subprocess.DEVNULL).decode().strip()
+        wpid_str = subprocess.check_output(
+            ["xdotool", "getwindowpid", wid_str],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode().strip()
         if wpid_str.isdigit():
             return int(wpid_str)
     except Exception:
         pass
     try:
-        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_PID"], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xprop", "-id", wid_str, "_NET_WM_PID"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         if "=" in out:
             val = out.split("=")[1].strip()
             if val.isdigit():
@@ -1042,7 +1060,11 @@ def get_window_wm_class(wid):
             return ("", "")
 
     try:
-        out = subprocess.check_output(["xprop", "-id", str(wid).strip(), "WM_CLASS"], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xprop", "-id", str(wid).strip(), "WM_CLASS"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         matches = re.findall(r'"([^"]*)"', out)
         if len(matches) >= 2:
             return (matches[0].lower(), matches[1].lower())
@@ -1133,16 +1155,28 @@ def get_all_managed_windows():
         return results
 
     try:
-        out = subprocess.check_output(["xdotool", "search", "--onlyvisible", ""], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xdotool", "search", "--onlyvisible", ""],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         for wid in out.splitlines():
             wid = wid.strip()
             if not wid or not is_valid_toplevel_window(wid) or not is_developer_window(wid):
                 continue
             try:
-                name = subprocess.check_output(["xdotool", "getwindowname", wid], stderr=subprocess.DEVNULL).decode().strip()
+                name = subprocess.check_output(
+                    ["xdotool", "getwindowname", wid],
+                    stderr=subprocess.DEVNULL,
+                    timeout=WINDOW_QUERY_TIMEOUT,
+                ).decode().strip()
                 if not name:
                     continue
-                wpid_str = subprocess.check_output(["xdotool", "getwindowpid", wid], stderr=subprocess.DEVNULL).decode().strip()
+                wpid_str = subprocess.check_output(
+                    ["xdotool", "getwindowpid", wid],
+                    stderr=subprocess.DEVNULL,
+                    timeout=WINDOW_QUERY_TIMEOUT,
+                ).decode().strip()
                 wpid = int(wpid_str) if wpid_str.isdigit() else 0
                 results.append((wid, name, wpid))
             except Exception:
@@ -1247,7 +1281,11 @@ def get_current_active_window():
         return ""
 
     try:
-        res = subprocess.check_output(["xdotool", "getactivewindow"], stderr=subprocess.DEVNULL)
+        res = subprocess.check_output(
+            ["xdotool", "getactivewindow"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
         wid = res.decode().strip()
         if wid.isdigit():
             return wid
@@ -1255,7 +1293,11 @@ def get_current_active_window():
         pass
 
     try:
-        out = subprocess.check_output(["xprop", "-root", "_NET_ACTIVE_WINDOW"], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xprop", "-root", "_NET_ACTIVE_WINDOW"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         if "_NET_ACTIVE_WINDOW(WINDOW)" in out and "#" in out:
             hex_val = out.split("#")[-1].strip().split()[0]
             if hex_val.startswith("0x") and hex_val != "0x0":
@@ -1507,6 +1549,129 @@ def update_auto_dismiss_state(active_since, is_active, delay, now=None):
     return active_since, (current_time - active_since) >= delay
 
 
+def probe_target_window_activity(target_window_id="", caller_pid=0, project_hint="", session_id=""):
+    """Resolves the target and checks its active state outside the UI thread."""
+    resolved_target = target_window_id
+    if not resolved_target or not is_valid_toplevel_window(resolved_target):
+        resolved_target = find_target_window(
+            window_id_arg="",
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+        )
+
+    active_wid = get_current_active_window()
+    target_is_active = is_target_window_active(
+        active_wid,
+        target_wid=resolved_target,
+        caller_pid=caller_pid,
+        project_hint=project_hint,
+        session_id=session_id,
+    )
+    return resolved_target, target_is_active
+
+
+class AsyncWindowActivityProbe:
+    """Runs at most one potentially blocking window activity probe at a time."""
+
+    def __init__(self, probe_func=None):
+        self._probe_func = probe_func or probe_target_window_activity
+        self._lock = threading.Lock()
+        self._running = False
+        self._result = None
+
+    def request(self, target_window_id="", caller_pid=0, project_hint="", session_id=""):
+        """Starts a daemon probe unless one is running or awaiting consumption."""
+        with self._lock:
+            if self._running or self._result is not None:
+                return False
+            self._running = True
+
+        worker = threading.Thread(
+            target=self._run,
+            args=(target_window_id, caller_pid, project_hint, session_id),
+            daemon=True,
+            name="notifier-window-activity",
+        )
+        worker.start()
+        return True
+
+    def _run(self, target_window_id, caller_pid, project_hint, session_id):
+        try:
+            result = self._probe_func(
+                target_window_id=target_window_id,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
+        except Exception:
+            result = (target_window_id, False)
+
+        with self._lock:
+            self._result = result
+            self._running = False
+
+    def take_result(self):
+        """Returns and clears the latest completed result without blocking."""
+        with self._lock:
+            result = self._result
+            self._result = None
+            return result
+
+
+def focus_target_window_async_task(target_window_id="", caller_pid=0, project_hint="", session_id=""):
+    """Resolves and focuses a target without calling GDK from the worker thread."""
+    return focus_notification_target(
+        target_window_id=target_window_id,
+        caller_pid=caller_pid,
+        project_hint=project_hint,
+        session_id=session_id,
+        allow_gdk=False,
+    )
+
+
+def focus_notification_target(target_window_id="", caller_pid=0, project_hint="", session_id="", allow_gdk=False):
+    """Focuses through the Wayland adapter first, then resolves an X11 fallback."""
+    resolved_target = target_window_id
+
+    if is_wayland_session():
+        focused = focus_target_window(
+            resolved_target,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+            allow_gdk=allow_gdk,
+        )
+        if focused:
+            return resolved_target, True
+        if resolved_target and is_valid_toplevel_window(resolved_target):
+            return resolved_target, False
+
+    if not resolved_target or not is_valid_toplevel_window(resolved_target):
+        resolved_target = find_target_window(
+            window_id_arg="",
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+        )
+
+    focused = focus_target_window(
+        resolved_target,
+        caller_pid=caller_pid,
+        project_hint=project_hint,
+        session_id=session_id,
+        allow_gdk=allow_gdk,
+    )
+    return resolved_target, focused
+
+
+class AsyncWindowFocusRequest(AsyncWindowActivityProbe):
+    """Single-flight background request used by popup focus controls."""
+
+    def __init__(self, focus_func=None):
+        super().__init__(probe_func=focus_func or focus_target_window_async_task)
+
+
 def get_queue_key(session_id="", window_id="", caller_pid=0, project_hint=""):
     """Generates a stable key for a window/session to track pending notifications."""
     if session_id and str(session_id).strip():
@@ -1531,14 +1696,22 @@ def get_window_workspace(wid):
         return None
 
     try:
-        out = subprocess.check_output(["xdotool", "get_desktop_for_window", wid_str], stderr=subprocess.DEVNULL).decode().strip()
+        out = subprocess.check_output(
+            ["xdotool", "get_desktop_for_window", wid_str],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode().strip()
         if out.lstrip("-").isdigit():
             return int(out)
     except Exception:
         pass
 
     try:
-        out = subprocess.check_output(["xprop", "-id", wid_str, "_NET_WM_DESKTOP"], stderr=subprocess.DEVNULL).decode()
+        out = subprocess.check_output(
+            ["xprop", "-id", wid_str, "_NET_WM_DESKTOP"],
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        ).decode()
         if "=" in out:
             val = out.split("=")[1].strip()
             if val.isdigit():
@@ -1564,17 +1737,35 @@ def switch_to_window_workspace(wid):
         return True
 
     try:
-        subprocess.run(["xdotool", "set_desktop_to_window", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["xdotool", "set_desktop_to_window", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
     except Exception:
         pass
 
     if target_desk is not None and target_desk >= 0:
         try:
-            subprocess.run(["xdotool", "set_desktop", str(target_desk)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["xdotool", "set_desktop", str(target_desk)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=WINDOW_QUERY_TIMEOUT,
+            )
         except Exception:
             pass
         try:
-            subprocess.run(["wmctrl", "-s", str(target_desk)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["wmctrl", "-s", str(target_desk)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=WINDOW_QUERY_TIMEOUT,
+            )
         except Exception:
             pass
     return True
@@ -1612,26 +1803,13 @@ def focus_wayland_target_window(caller_pid=0, project_hint="", session_id="", ve
     if result.returncode != 0 or "true" not in result.stdout.lower():
         return False
 
-    deadline = time.monotonic() + max(float(verify_timeout), 0.0)
-    while time.monotonic() < deadline:
-        active_windows = get_wayland_active_windows()
-        if active_windows is None:
-            return True
-        if any(
-            wayland_window_matches_target(
-                window_info,
-                caller_pid=caller_pid,
-                project_hint=project_hint,
-                session_id=session_id,
-            )
-            for window_info in active_windows
-        ):
-            return True
-        time.sleep(0.05)
-    return False
+    # The compositor adapter activates a unique verified target before returning
+    # true. Avoid a second AT-SPI scan here because accessibility clients can
+    # block indefinitely on an unresponsive application.
+    return True
 
 
-def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_hint="", session_id=""):
+def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_hint="", session_id="", allow_gdk=True):
     """Activates and brings to front the specified target window ID.
     Returns True if focus activation was successfully verified, False otherwise.
     """
@@ -1714,29 +1892,54 @@ def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_
     switch_to_window_workspace(wid_str)
     time.sleep(0.04)
 
+    if allow_gdk:
+        try:
+            import gi
+            gi.require_version("Gdk", "3.0")
+            gi.require_version("GdkX11", "3.0")
+            from gi.repository import Gdk, GdkX11
+            display = Gdk.Display.get_default()
+            if display and isinstance(display, GdkX11.X11Display):
+                gdk_win = GdkX11.X11Window.foreign_new_for_display(display, wid_int)
+                if gdk_win:
+                    gdk_win.focus(Gdk.CURRENT_TIME)
+                    gdk_win.show()
+        except Exception:
+            pass
+
     try:
-        import gi
-        gi.require_version("Gdk", "3.0")
-        gi.require_version("GdkX11", "3.0")
-        from gi.repository import Gdk, GdkX11
-        display = Gdk.Display.get_default()
-        if display and isinstance(display, GdkX11.X11Display):
-            gdk_win = GdkX11.X11Window.foreign_new_for_display(display, wid_int)
-            if gdk_win:
-                gdk_win.focus(Gdk.CURRENT_TIME)
-                gdk_win.show()
+        subprocess.run(
+            ["wmctrl", "-i", "-a", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
     except Exception:
         pass
 
     try:
-        subprocess.run(["wmctrl", "-i", "-a", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
-    try:
-        subprocess.run(["xdotool", "windowactivate", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["xdotool", "windowraise", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["xdotool", "windowfocus", "--sync", wid_str], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
+        subprocess.run(
+            ["xdotool", "windowraise", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
+        subprocess.run(
+            ["xdotool", "windowfocus", "--sync", wid_str],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=WINDOW_QUERY_TIMEOUT,
+        )
     except Exception:
         pass
 
@@ -1769,20 +1972,14 @@ def focus_active_or_queued_notification():
             caller_pid = item.get("caller_pid", 0)
             project_hint = item.get("project_hint", "")
             session_id = item.get("session_id", "")
-            wid = item.get("target_window_id", "")
-            if not wid or not is_valid_toplevel_window(wid):
-                wid = find_target_window(
-                    window_id_arg="",
-                    caller_pid=caller_pid,
-                    project_hint=project_hint,
-                    session_id=session_id,
-                )
-            if focus_target_window(
-                wid,
+            wid, focused = focus_notification_target(
+                target_window_id=item.get("target_window_id", ""),
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
-            ):
+                allow_gdk=False,
+            )
+            if focused:
                 kill_previous_instance()
                 remove_from_queue(k)
                 pop_next_notification_async(exclude_key=k)
@@ -1963,29 +2160,20 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
 
     windows = []
     closing = [False]
+    focus_request = AsyncWindowFocusRequest()
+    focus_buttons = []
 
-    def handle_focus_and_close(event=None):
-        if closing[0]:
-            return
+    def set_focus_pending(pending):
+        for button in focus_buttons:
+            try:
+                button.configure(
+                    text="Đang chuyển..." if pending else "Đến cửa sổ (Alt+Q)",
+                    state=tk.DISABLED if pending else tk.NORMAL,
+                )
+            except Exception:
+                pass
 
-        wid_to_focus = target_window_id
-        if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
-            wid_to_focus = find_target_window(
-                window_id_arg="",
-                caller_pid=caller_pid,
-                project_hint=project_hint,
-                session_id=session_id,
-            )
-        focused = focus_target_window(
-            wid_to_focus,
-            caller_pid=caller_pid,
-            project_hint=project_hint,
-            session_id=session_id,
-        )
-
-        if not focused:
-            return
-
+    def finish_focus_and_close():
         closing[0] = True
         if queue_key:
             remove_from_queue(queue_key)
@@ -2001,6 +2189,19 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
             root.quit()
         except Exception:
             pass
+
+    def handle_focus_and_close(event=None):
+        if closing[0]:
+            return
+
+        started = focus_request.request(
+            target_window_id=target_window_id,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+        )
+        if started:
+            set_focus_pending(True)
 
     def handle_close_only(event=None):
         if closing[0]:
@@ -2078,6 +2279,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
             command=handle_focus_and_close
         )
         btn_focus.pack(side=tk.LEFT)
+        focus_buttons.append(btn_focus)
 
         btn_close = tk.Button(
             btn_frame,
@@ -2109,38 +2311,59 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
 
         windows.append(win)
 
+    def check_focus_request():
+        if closing[0]:
+            return
+
+        nonlocal target_window_id
+        focus_result = focus_request.take_result()
+        if focus_result is not None:
+            target_window_id, focused = focus_result
+            if focused:
+                finish_focus_and_close()
+                return
+            set_focus_pending(False)
+
+        root.after(50, check_focus_request)
+
+    root.after(50, check_focus_request)
+
     if auto_dismiss_delay > 0:
         active_since = [None]
+        activity_probe = AsyncWindowActivityProbe()
+
         def check_active_timer():
             if closing[0]:
                 return
+
             nonlocal target_window_id
-            if not target_window_id or not is_valid_toplevel_window(target_window_id):
-                target_window_id = find_target_window(
-                    window_id_arg="",
-                    caller_pid=caller_pid,
-                    project_hint=project_hint,
-                    session_id=session_id,
+            probe_result = activity_probe.take_result()
+            if probe_result is not None:
+                target_window_id, target_is_active = probe_result
+                active_since[0], should_dismiss = update_auto_dismiss_state(
+                    active_since[0],
+                    target_is_active,
+                    auto_dismiss_delay,
                 )
-            active_wid = get_current_active_window()
-            target_is_active = is_target_window_active(
-                active_wid,
-                target_wid=target_window_id,
+                if should_dismiss:
+                    handle_close_only()
+                    return
+
+            activity_probe.request(
+                target_window_id=target_window_id,
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
             )
-            active_since[0], should_dismiss = update_auto_dismiss_state(
-                active_since[0],
-                target_is_active,
-                auto_dismiss_delay,
-            )
-            if should_dismiss:
-                handle_close_only()
-                return
 
             root.after(100, check_active_timer)
 
+        activity_probe.request(
+            target_window_id=target_window_id,
+            caller_pid=caller_pid,
+            project_hint=project_hint,
+            session_id=session_id,
+        )
         root.after(100, check_active_timer)
 
     if timeout > 0:
@@ -2200,6 +2423,31 @@ def calculate_overlay_placement(geo_dict, win_width, win_height=0, top_margin=30
 
     win_y = y + top_margin
     return win_x, win_y
+
+
+def reserve_initial_overlay_placement(placement_state, width, height):
+    """Reserves the first valid allocation so an overlay is moved only once."""
+    if placement_state[0] or int(width or 0) <= 1 or int(height or 0) <= 1:
+        return False
+    placement_state[0] = True
+    return True
+
+
+def widget_is_or_has_parent_type(widget, widget_type, boundary=None):
+    """Checks a GTK event origin and its parents without importing GTK globally."""
+    current = widget
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, widget_type):
+            return True
+        if current is boundary:
+            break
+        try:
+            current = current.get_parent()
+        except Exception:
+            break
+    return False
 
 
 def get_target_monitor_indices(n_monitors, can_place_windows):
@@ -2371,30 +2619,18 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
 
         windows = []
         closing = [False]
+        focus_request = AsyncWindowFocusRequest()
+        focus_buttons = []
 
-        def handle_focus_and_close():
-            if closing[0]:
-                return
+        def set_focus_pending(pending):
+            for button in focus_buttons:
+                try:
+                    button.set_label("Đang chuyển..." if pending else "Đến cửa sổ (Alt+Q)")
+                    button.set_sensitive(not pending)
+                except Exception:
+                    pass
 
-            wid_to_focus = target_window_id
-            if not wid_to_focus or not is_valid_toplevel_window(wid_to_focus):
-                wid_to_focus = find_target_window(
-                    window_id_arg="",
-                    caller_pid=caller_pid,
-                    project_hint=project_hint,
-                    session_id=session_id,
-                )
-
-            focused = focus_target_window(
-                wid_to_focus,
-                caller_pid=caller_pid,
-                project_hint=project_hint,
-                session_id=session_id,
-            )
-
-            if not focused:
-                return
-
+        def finish_focus_and_close():
             closing[0] = True
             if queue_key:
                 remove_from_queue(queue_key)
@@ -2408,6 +2644,19 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     pass
 
             GLib.timeout_add(60, Gtk.main_quit)
+
+        def handle_focus_and_close():
+            if closing[0]:
+                return
+
+            started = focus_request.request(
+                target_window_id=target_window_id,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
+            if started:
+                set_focus_pending(True)
 
         def handle_close_only():
             if closing[0]:
@@ -2475,7 +2724,15 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
             event_box = Gtk.EventBox()
             event_box.set_visible_window(True)
             event_box.get_style_context().add_class("notification-card")
-            event_box.connect("button-press-event", lambda w, e: handle_close_only())
+
+            def handle_card_button_press(card, event):
+                event_widget = Gtk.get_event_widget(event)
+                if widget_is_or_has_parent_type(event_widget, Gtk.Button, boundary=card):
+                    return False
+                handle_close_only()
+                return True
+
+            event_box.connect("button-press-event", handle_card_button_press)
 
             vbox_main = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             vbox_main.get_style_context().add_class("banner-box")
@@ -2537,6 +2794,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
             btn_focus = Gtk.Button(label="Đến cửa sổ (Alt+Q)")
             btn_focus.get_style_context().add_class("focus-btn")
             btn_focus.connect("clicked", lambda b: handle_focus_and_close())
+            focus_buttons.append(btn_focus)
 
             btn_close = Gtk.Button(label="✕ Đóng")
             btn_close.get_style_context().add_class("close-btn")
@@ -2552,14 +2810,39 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
 
             win.set_size_request(win_width, -1)
             win.set_default_size(win_width, -1)
+            placement_scheduled = [False]
 
-            def on_size_allocate(w, alloc, g_dict, mon_idx):
+            def on_size_allocate(w, alloc, g_dict, mon_idx, placement_state):
+                if not reserve_initial_overlay_placement(
+                    placement_state,
+                    alloc.width,
+                    alloc.height,
+                ):
+                    return
+
                 win_x, win_y = calculate_overlay_placement(g_dict, alloc.width, alloc.height, top_margin=30)
-                w.move(win_x, win_y)
-                if is_debug:
-                    print(f"[multi-desktop-notify] win mon={mon_idx} placed at ({win_x}, {win_y})")
 
-            win.connect("size-allocate", lambda w, alloc, gd=geo_dict, idx=i: on_size_allocate(w, alloc, gd, idx))
+                def apply_initial_placement():
+                    try:
+                        w.move(win_x, win_y)
+                        if is_debug:
+                            print(f"[multi-desktop-notify] win mon={mon_idx} placed at ({win_x}, {win_y})")
+                    except Exception:
+                        pass
+                    return False
+
+                GLib.idle_add(apply_initial_placement)
+
+            win.connect(
+                "size-allocate",
+                lambda w, alloc, gd=geo_dict, idx=i, state=placement_scheduled: on_size_allocate(
+                    w,
+                    alloc,
+                    gd,
+                    idx,
+                    state,
+                ),
+            )
 
             def on_key_press(w, event):
                 if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space, Gdk.KEY_f, Gdk.KEY_F, Gdk.KEY_y, Gdk.KEY_Y):
@@ -2575,41 +2858,59 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
             win.stick()
             windows.append(win)
 
+        def check_focus_request():
+            if closing[0]:
+                return False
+
+            nonlocal target_window_id
+            focus_result = focus_request.take_result()
+            if focus_result is not None:
+                target_window_id, focused = focus_result
+                if focused:
+                    finish_focus_and_close()
+                    return False
+                set_focus_pending(False)
+
+            return True
+
+        GLib.timeout_add(50, check_focus_request)
+
         if auto_dismiss_delay > 0:
             active_since = [None]
+            activity_probe = AsyncWindowActivityProbe()
 
             def check_target_window_active_timer():
                 if closing[0]:
                     return False
 
                 nonlocal target_window_id
-                if not target_window_id or not is_valid_toplevel_window(target_window_id):
-                    target_window_id = find_target_window(
-                        window_id_arg="",
-                        caller_pid=caller_pid,
-                        project_hint=project_hint,
-                        session_id=session_id,
+                probe_result = activity_probe.take_result()
+                if probe_result is not None:
+                    target_window_id, target_is_active = probe_result
+                    active_since[0], should_dismiss = update_auto_dismiss_state(
+                        active_since[0],
+                        target_is_active,
+                        auto_dismiss_delay,
                     )
+                    if should_dismiss:
+                        handle_close_only()
+                        return False
 
-                active_wid = get_current_active_window()
-                target_is_active = is_target_window_active(
-                    active_wid,
-                    target_wid=target_window_id,
+                activity_probe.request(
+                    target_window_id=target_window_id,
                     caller_pid=caller_pid,
                     project_hint=project_hint,
                     session_id=session_id,
                 )
-                active_since[0], should_dismiss = update_auto_dismiss_state(
-                    active_since[0],
-                    target_is_active,
-                    auto_dismiss_delay,
-                )
-                if should_dismiss:
-                    handle_close_only()
-                    return False
 
                 return True
 
+            activity_probe.request(
+                target_window_id=target_window_id,
+                caller_pid=caller_pid,
+                project_hint=project_hint,
+                session_id=session_id,
+            )
             GLib.timeout_add(100, check_target_window_active_timer)
 
         if timeout > 0:
@@ -2809,36 +3110,24 @@ def main():
         project_hint=args.project_hint,
     )
 
-    if args.event_type:
-        is_completion = (args.event_type == "complete")
-    else:
-        # Conservative fallback if --event-type is not provided
-        t_low = args.title.lower()
-        has_complete_word = any(k in t_low for k in ["hoàn thành", "complete", "finish", "done", "thành công"])
-        has_action_word = any(k in t_low for k in ["câu hỏi", "hỏi", "question", "ask", "quyền", "permission", "grant", "exec", "run"])
-        is_completion = has_complete_word and not has_action_word
-
-    if not is_completion:
-        notif_item = {
-            "key": queue_key,
-            "app_name": args.app_name,
-            "title": args.title,
-            "message": message,
-            "questions_json": args.questions_json,
-            "urgency": args.urgency,
-            "event_type": args.event_type or "info",
-            "sound": args.sound,
-            "target_window_id": target_window_id,
-            "caller_pid": args.caller_pid,
-            "project_hint": args.project_hint,
-            "session_id": args.session_id,
-            "timeout": args.timeout,
-            "created_at": time.time(),
-        }
-        if not args.from_queue:
-            save_to_queue(queue_key, notif_item)
-    else:
-        remove_from_queue(queue_key)
+    notif_item = {
+        "key": queue_key,
+        "app_name": args.app_name,
+        "title": args.title,
+        "message": message,
+        "questions_json": args.questions_json,
+        "urgency": args.urgency,
+        "event_type": args.event_type or "info",
+        "sound": args.sound,
+        "target_window_id": target_window_id,
+        "caller_pid": args.caller_pid,
+        "project_hint": args.project_hint,
+        "session_id": args.session_id,
+        "timeout": args.timeout,
+        "created_at": time.time(),
+    }
+    if not args.from_queue:
+        save_to_queue(queue_key, notif_item)
 
     # 6. Play sound asynchronously
     if args.sound:

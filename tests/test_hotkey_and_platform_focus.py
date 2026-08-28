@@ -105,7 +105,8 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
 
     @patch.object(mdn, "is_valid_toplevel_window", return_value=True)
     @patch.object(mdn, "focus_target_window", return_value=True)
-    def test_alt_q_selects_oldest_queued_notification(self, mock_focus, mock_valid):
+    @patch.object(mdn, "is_wayland_session", return_value=False)
+    def test_alt_q_selects_oldest_queued_notification(self, mock_wayland, mock_focus, mock_valid):
         # Insert 3 notifications with distinct timestamps
         t0 = time.time() - 100
         t1 = time.time() - 50
@@ -119,7 +120,13 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 0)
             # Oldest (key_0) should have been focused and removed first!
-            mock_focus.assert_called_with("1000", caller_pid=0, project_hint="", session_id="s0")
+            mock_focus.assert_called_with(
+                "1000",
+                caller_pid=0,
+                project_hint="",
+                session_id="s0",
+                allow_gdk=False,
+            )
             q = mdn.load_notification_queue()
             self.assertNotIn("key_0", q)
             self.assertIn("key_1", q)
@@ -127,7 +134,8 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
 
     @patch.object(mdn, "is_valid_toplevel_window", return_value=True)
     @patch.object(mdn, "focus_target_window", return_value=True)
-    def test_click_uses_target_snapshot_not_polluted_session_cache(self, mock_focus, mock_valid):
+    @patch.object(mdn, "is_wayland_session", return_value=False)
+    def test_click_uses_target_snapshot_not_polluted_session_cache(self, mock_wayland, mock_focus, mock_valid):
         # Notification A was created with target_window_id "1001"
         mdn.save_to_queue("key_A", {"target_window_id": "1001", "created_at": time.time(), "session_id": "sess_A"})
 
@@ -139,7 +147,38 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
         with patch.object(mdn, "kill_previous_instance"), patch.object(mdn, "pop_next_notification_async"):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 0)
-            mock_focus.assert_called_with("1001", caller_pid=0, project_hint="", session_id="sess_A")
+            mock_focus.assert_called_with(
+                "1001",
+                caller_pid=0,
+                project_hint="",
+                session_id="sess_A",
+                allow_gdk=False,
+            )
+
+    def test_alt_q_uses_wayland_adapter_before_x11_scan(self):
+        mdn.save_to_queue("key_wayland", {
+            "target_window_id": "",
+            "created_at": time.time(),
+            "session_id": "sess_wayland",
+            "caller_pid": 900,
+            "project_hint": "project",
+        })
+
+        with patch.object(mdn, "is_wayland_session", return_value=True), \
+             patch.object(mdn, "find_target_window") as mock_find, \
+             patch.object(mdn, "focus_target_window", return_value=True) as mock_focus, \
+             patch.object(mdn, "kill_previous_instance"), \
+             patch.object(mdn, "pop_next_notification_async"):
+            self.assertEqual(mdn.focus_active_or_queued_notification(), 0)
+
+        mock_find.assert_not_called()
+        mock_focus.assert_called_once_with(
+            "",
+            caller_pid=900,
+            project_hint="project",
+            session_id="sess_wayland",
+            allow_gdk=False,
+        )
 
 
 if __name__ == "__main__":

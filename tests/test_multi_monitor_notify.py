@@ -163,6 +163,53 @@ class TestDistinctPlacements(unittest.TestCase):
         self.assertEqual(len(placements), 3)
 
 
+class TestOneShotOverlayPlacement(unittest.TestCase):
+    """Prevents GTK allocation events from creating a move/configure loop."""
+
+    def test_only_first_valid_allocation_is_reserved(self):
+        state = [False]
+
+        self.assertFalse(mdn.reserve_initial_overlay_placement(state, 0, 100))
+        self.assertFalse(mdn.reserve_initial_overlay_placement(state, 460, 1))
+        self.assertTrue(mdn.reserve_initial_overlay_placement(state, 460, 120))
+        self.assertFalse(mdn.reserve_initial_overlay_placement(state, 460, 120))
+
+    def test_each_monitor_has_independent_placement_state(self):
+        first_monitor = [False]
+        second_monitor = [False]
+
+        self.assertTrue(mdn.reserve_initial_overlay_placement(first_monitor, 460, 120))
+        self.assertTrue(mdn.reserve_initial_overlay_placement(second_monitor, 460, 120))
+
+
+class TestGtkPointerEventRouting(unittest.TestCase):
+    """Ensures the notification card does not consume child button clicks."""
+
+    class FakeWidget:
+        def __init__(self, parent=None):
+            self.parent = parent
+
+        def get_parent(self):
+            return self.parent
+
+    class FakeButton(FakeWidget):
+        pass
+
+    def test_button_and_button_child_are_detected(self):
+        card = self.FakeWidget()
+        button = self.FakeButton(parent=card)
+        button_child = self.FakeWidget(parent=button)
+
+        self.assertTrue(mdn.widget_is_or_has_parent_type(button, self.FakeButton, boundary=card))
+        self.assertTrue(mdn.widget_is_or_has_parent_type(button_child, self.FakeButton, boundary=card))
+
+    def test_background_widget_is_not_treated_as_button(self):
+        card = self.FakeWidget()
+        label = self.FakeWidget(parent=card)
+
+        self.assertFalse(mdn.widget_is_or_has_parent_type(label, self.FakeButton, boundary=card))
+
+
 class TestGtkInitFallback(unittest.TestCase):
     """Tests the fallback retry logic when X11 backend initialization fails."""
 

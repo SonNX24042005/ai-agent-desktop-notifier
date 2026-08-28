@@ -9,6 +9,7 @@ import sys
 import time
 import json
 import tempfile
+import threading
 import unittest
 import importlib.util
 from pathlib import Path
@@ -267,6 +268,168 @@ class TestAutoDismissTimerLogic(unittest.TestCase):
         self.assertTrue(should_dismiss)
 
 
+class TestAsyncWindowActivityProbe(unittest.TestCase):
+    """Tests that activity inspection cannot block or overlap on the UI thread."""
+
+    def test_probe_resolves_target_and_checks_active_state(self):
+        with patch.object(mdn, "is_valid_toplevel_window", return_value=False), \
+             patch.object(mdn, "find_target_window", return_value="222") as mock_find, \
+             patch.object(mdn, "get_current_active_window", return_value="222"), \
+             patch.object(mdn, "is_target_window_active", return_value=True) as mock_active:
+            result = mdn.probe_target_window_activity(
+                target_window_id="111",
+                caller_pid=900,
+                project_hint="project",
+                session_id="session-1",
+            )
+
+        self.assertEqual(result, ("222", True))
+        mock_find.assert_called_once_with(
+            window_id_arg="",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+        )
+        mock_active.assert_called_once_with(
+            "222",
+            target_wid="222",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+        )
+
+    def test_probe_rejects_overlapping_requests(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_probe(**kwargs):
+            started.set()
+            release.wait(timeout=1.0)
+            return kwargs["target_window_id"], True
+
+        probe = mdn.AsyncWindowActivityProbe(probe_func=slow_probe)
+        self.assertTrue(probe.request(target_window_id="123"))
+        self.assertTrue(started.wait(timeout=0.5))
+        self.assertFalse(probe.request(target_window_id="456"))
+
+        release.set()
+        result = None
+        deadline = time.monotonic() + 1.0
+        while result is None and time.monotonic() < deadline:
+            result = probe.take_result()
+            if result is None:
+                time.sleep(0.01)
+
+        self.assertEqual(result, ("123", True))
+        self.assertTrue(probe.request(target_window_id="456"))
+
+    def test_probe_converts_worker_error_to_inactive_result(self):
+        def failing_probe(**kwargs):
+            raise RuntimeError("query failed")
+
+        probe = mdn.AsyncWindowActivityProbe(probe_func=failing_probe)
+        self.assertTrue(probe.request(target_window_id="789"))
+
+        result = None
+        deadline = time.monotonic() + 1.0
+        while result is None and time.monotonic() < deadline:
+            result = probe.take_result()
+            if result is None:
+                time.sleep(0.01)
+
+        self.assertEqual(result, ("789", False))
+
+    def test_linux_window_query_has_a_timeout(self):
+        with patch.object(mdn, "IS_WINDOWS", False), \
+             patch.object(
+                 mdn.subprocess,
+                 "check_output",
+                 return_value=b"_NET_WM_STATE(WINDOW):\n",
+             ) as mock_check_output:
+            self.assertTrue(mdn.is_valid_toplevel_window("123"))
+
+        self.assertEqual(
+            mock_check_output.call_args.kwargs["timeout"],
+            mdn.WINDOW_QUERY_TIMEOUT,
+        )
+
+
+class TestAsyncWindowFocusRequest(unittest.TestCase):
+    """Tests that popup focus work stays outside the UI thread."""
+
+    def test_focus_task_resolves_target_without_worker_gdk_calls(self):
+        with patch.object(mdn, "is_wayland_session", return_value=False), \
+             patch.object(mdn, "is_valid_toplevel_window", return_value=False), \
+             patch.object(mdn, "find_target_window", return_value="222") as mock_find, \
+             patch.object(mdn, "focus_target_window", return_value=True) as mock_focus:
+            result = mdn.focus_target_window_async_task(
+                target_window_id="111",
+                caller_pid=900,
+                project_hint="project",
+                session_id="session-1",
+            )
+
+        self.assertEqual(result, ("222", True))
+        mock_find.assert_called_once_with(
+            window_id_arg="",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+        )
+        mock_focus.assert_called_once_with(
+            "222",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            allow_gdk=False,
+        )
+
+    def test_focus_task_uses_wayland_adapter_before_window_scan(self):
+        with patch.object(mdn, "is_wayland_session", return_value=True), \
+             patch.object(mdn, "find_target_window") as mock_find, \
+             patch.object(mdn, "focus_target_window", return_value=True) as mock_focus:
+            result = mdn.focus_target_window_async_task(
+                target_window_id="",
+                caller_pid=900,
+                project_hint="project",
+                session_id="session-1",
+            )
+
+        self.assertEqual(result, ("", True))
+        mock_find.assert_not_called()
+        mock_focus.assert_called_once_with(
+            "",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            allow_gdk=False,
+        )
+
+    def test_focus_request_is_single_flight(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_focus(**kwargs):
+            started.set()
+            release.wait(timeout=1.0)
+            return kwargs["target_window_id"], False
+
+        request = mdn.AsyncWindowFocusRequest(focus_func=slow_focus)
+        self.assertTrue(request.request(target_window_id="123"))
+        self.assertTrue(started.wait(timeout=0.5))
+        self.assertFalse(request.request(target_window_id="456"))
+        release.set()
+
+        result = None
+        deadline = time.monotonic() + 1.0
+        while result is None and time.monotonic() < deadline:
+            result = request.take_result()
+            if result is None:
+                time.sleep(0.01)
+
+        self.assertEqual(result, ("123", False))
+
+
 class TestFocusVerificationAndQueueTransaction(unittest.TestCase):
     """Tests for focus verification and preserving queue items on focus failure."""
 
@@ -480,15 +643,14 @@ class TestWaylandActiveWindowDetection(unittest.TestCase):
 
 
 class TestWaylandWindowFocusAdapter(unittest.TestCase):
-    """Tests GNOME Shell D-Bus activation and post-focus verification."""
+    """Tests GNOME Shell D-Bus activation without a blocking AT-SPI rescan."""
 
     @patch.object(mdn, "is_wayland_session", return_value=True)
     @patch.object(mdn, "get_session_window_info", return_value=None)
-    @patch.object(mdn, "get_wayland_active_windows", return_value=[{"app_name": "code", "pid": 700, "title": "project"}])
-    @patch.object(mdn, "wayland_window_matches_target", return_value=True)
+    @patch.object(mdn, "get_wayland_active_windows")
     @patch.object(mdn.subprocess, "run")
-    def test_focus_wayland_target_uses_shell_adapter_and_verifies(
-        self, mock_run, mock_match, mock_windows, mock_session, mock_wayland
+    def test_focus_wayland_target_trusts_successful_shell_adapter(
+        self, mock_run, mock_windows, mock_session, mock_wayland
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="(true,)")
 
@@ -502,7 +664,7 @@ class TestWaylandWindowFocusAdapter(unittest.TestCase):
         self.assertIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindow", command)
         self.assertIn("900", command)
         self.assertIn("project", command)
-        mock_match.assert_called_once()
+        mock_windows.assert_not_called()
 
     @patch.object(mdn, "is_wayland_session", return_value=True)
     @patch.object(mdn, "get_session_window_info", return_value=None)

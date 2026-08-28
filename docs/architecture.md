@@ -113,6 +113,9 @@ Adapter phải ưu tiên tính an toàn cho agent: payload lỗi hoặc lỗi g�
 - chọn, focus và chuyển workspace;
 - dựng popup Windows bằng Tkinter;
 - dựng popup Linux bằng GTK3/GDK;
+- dò trạng thái cửa sổ nền bằng `AsyncWindowActivityProbe`, không chạy truy vấn hệ thống trên luồng giao diện;
+- xử lý yêu cầu focus nền bằng `AsyncWindowFocusRequest`, chỉ cập nhật và đóng popup trên luồng giao diện sau khi focus thành công;
+- đặt vị trí mỗi overlay X11/XWayland đúng một lần sau allocation hợp lệ đầu tiên để tránh vòng lặp configure/allocate;
 - điều phối CLI và vòng đời tiến trình.
 
 Không nên đưa logic hiểu payload riêng của agent vào engine. Logic đó thuộc adapter. Ngược lại, không nên sao chép logic queue, focus hoặc render vào adapter.
@@ -195,7 +198,7 @@ Mục đích của luồng này là chụp cửa sổ khi quan hệ còn rõ rà
 4. Kết thúc popup cũ bằng PID file và kiểm tra danh tính tiến trình để tránh chồng nhiều nhóm popup.
 5. Tìm cửa sổ mục tiêu theo thuật toán identity nghiêm ngặt.
 6. Tạo khóa queue theo session, window, PID, project hoặc khóa mặc định.
-7. Nếu loại sự kiện không phải hoàn thành, cập nhật item vào queue; nếu là hoàn thành, xóa item cùng khóa.
+7. Cập nhật item vào queue cho mọi loại sự kiện, kể cả hoàn thành, để nút đến cửa sổ và `Alt+Q` dùng cùng identity trong lúc popup còn hiển thị. Đường `--from-queue` không ghi ngược item vừa lấy.
 8. Phát âm thanh và gửi webhook trong nền.
 9. Chọn backend theo hệ điều hành và hiển thị popup.
 
@@ -218,7 +221,7 @@ stateDiagram-v2
 
 Khi focus bằng `anoti focus`, engine duyệt từ item cũ nhất. Item chỉ bị xóa sau khi focus đã được xác minh thành công. Nếu không có queue hợp lệ, engine thử session cache mới cập nhật gần nhất. Engine không focus một cửa sổ developer ngẫu nhiên.
 
-Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue. Cả hai backend dùng chung `update_auto_dismiss_state()` để chỉ đóng khi identity mục tiêu được xác nhận active liên tục đủ `auto_dismiss_delay` (mặc định 1,5 giây); khi người dùng chuyển sang cửa sổ khác, mốc thời gian được đặt lại.
+Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue. Cả hai backend dùng chung `update_auto_dismiss_state()` để chỉ đóng khi identity mục tiêu được xác nhận active liên tục đủ `auto_dismiss_delay` (mặc định 1,5 giây); khi người dùng chuyển sang cửa sổ khác, mốc thời gian được đặt lại. Việc phân giải và kiểm tra cửa sổ chạy qua `AsyncWindowActivityProbe` trên một luồng nền daemon, chỉ cho phép một lượt dò tại một thời điểm. Nút đến cửa sổ gửi một `AsyncWindowFocusRequest` single-flight riêng, chuyển sang trạng thái `Đang chuyển...` trong lúc xử lý; nếu focus thất bại popup vẫn mở và bật lại nút để thử lại, nếu thành công luồng giao diện mới đóng popup và chuyển queue. Trên GTK, khung nền bỏ qua sự kiện chuột bắt nguồn từ `Gtk.Button` hoặc widget con của nút để không đóng popup trước tín hiệu `clicked`. Luồng Tkinter/GTK chỉ lấy kết quả đã hoàn thành nên vẫn xử lý vẽ, đóng và sự kiện ngay cả khi API cửa sổ hoặc tiến trình con phản hồi chậm.
 
 ## 8. Thuật toán nhận diện cửa sổ và chính sách focus
 
@@ -231,8 +234,10 @@ Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` đ�
 5. **Tầng 4 (Wayland GNOME Terminal fallback)**: Kích hoạt GNOME Terminal qua D-Bus (`org.gnome.Terminal.Preferences`) khi chạy Wayland thuần.
 6. **Tầng 5 (An toàn tuyệt đối)**: Trả về chuỗi rỗng khi không thể xác định duy nhất mục tiêu. Tuyệt đối không chọn bừa cửa sổ ngẫu nhiên.
 
-### 8.1. Bộ đếm thời gian Monotonic (1,5 giây continuous active)
-- Sử dụng `time.monotonic()` và chu kỳ kiểm tra 100ms.
+### 8.1. Bộ đếm thời gian monotonic (1,5 giây active liên tục)
+- Sử dụng `time.monotonic()` và chu kỳ lấy kết quả 100 ms trên luồng giao diện.
+- Mỗi lượt dò identity và trạng thái active chạy trên luồng nền; probe mới không được tạo khi lượt trước còn chạy hoặc kết quả chưa được lấy.
+- Các lệnh truy vấn cửa sổ X11 dùng timeout 0,75 giây để tiến trình con không bị treo vô hạn.
 - Trên X11 và Windows: Đối chiếu chính xác ID cửa sổ active (`_NET_ACTIVE_WINDOW` / `GetForegroundWindow`).
 - Trên Linux Wayland thuần: Đọc cửa sổ active qua AT-SPI và đối chiếu PID tổ tiên, project hint hoặc session fingerprint. PTY chỉ là fallback khi AT-SPI không khả dụng.
 - Reset `active_since = None` ngay lập tức khi người dùng chuyển sang cửa sổ khác hoặc rời khỏi terminal.
@@ -252,7 +257,7 @@ Trên Linux X11/XWayland, engine:
 - Gọi `gdk_win.focus()`, `wmctrl -i -a` và `xdotool windowactivate --sync`;
 - Kiểm tra lại active window trong tối đa khoảng 0,4 giây.
 
-Trên GNOME Wayland native, engine không giả lập X11. `focus_wayland_target_window()` gửi identity gồm caller PID, project hint và title fingerprint qua D-Bus đến adapter GNOME Shell. Adapter chạy trong compositor, chỉ chấp nhận cửa sổ developer khớp duy nhất, gọi `Main.activateWindow()` để chuyển workspace và đưa cửa sổ lên foreground, sau đó engine xác minh lại qua AT-SPI. Nếu target mơ hồ hoặc focus thất bại, popup và queue item được giữ nguyên để người dùng thử lại.
+Trên GNOME Wayland native, engine không giả lập X11. `focus_wayland_target_window()` gửi identity gồm caller PID, project hint và title fingerprint qua D-Bus đến adapter GNOME Shell. Adapter chạy trong compositor, chỉ chấp nhận cửa sổ developer khớp duy nhất rồi gọi `Main.activateWindow()` để chuyển workspace và đưa cửa sổ lên foreground. Khi adapter trả về thành công, engine chấp nhận kết quả ngay vì việc chọn duy nhất và kích hoạt đã diễn ra trong compositor; engine không quét lại AT-SPI đồng bộ, tránh bị chặn bởi một accessibility client không phản hồi. Chỉ khi adapter thất bại, engine mới phân giải và thử fallback X11/XWayland. Nếu target mơ hồ hoặc focus thất bại, popup và queue item được giữ nguyên để người dùng thử lại.
 
 ## 9. Trạng thái và dữ liệu runtime
 
