@@ -296,6 +296,7 @@ class TestAsyncWindowActivityProbe(unittest.TestCase):
             caller_pid=900,
             project_hint="project",
             session_id="session-1",
+            app_hint="",
         )
 
     def test_probe_rejects_overlapping_requests(self):
@@ -381,6 +382,7 @@ class TestAsyncWindowFocusRequest(unittest.TestCase):
             caller_pid=900,
             project_hint="project",
             session_id="session-1",
+            app_hint="",
             allow_gdk=False,
         )
 
@@ -402,6 +404,7 @@ class TestAsyncWindowFocusRequest(unittest.TestCase):
             caller_pid=900,
             project_hint="project",
             session_id="session-1",
+            app_hint="",
             allow_gdk=False,
         )
 
@@ -641,6 +644,46 @@ class TestWaylandActiveWindowDetection(unittest.TestCase):
             wayland_windows=active_windows,
         ))
 
+    def test_antigravity_app_hint_matches_without_project_in_title(self):
+        self.assertTrue(mdn.wayland_window_matches_target(
+            {"app_name": "Antigravity", "pid": 0, "title": "Agent manager"},
+            project_hint="different-project",
+            app_hint="Antigravity",
+        ))
+
+    def test_codex_desktop_app_hint_matches_chatgpt_window(self):
+        self.assertIn("chatgpt", mdn.DEVELOPER_CLASSES)
+        self.assertTrue(mdn.wayland_window_matches_target(
+            {"app_name": "Chatgpt", "pid": 0, "title": "ChatGPT"},
+            project_hint="ai-agent-desktop-notifier",
+            app_hint="Codex",
+        ))
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "probe_wayland_target_window_activity", return_value=True)
+    @patch.object(mdn, "find_target_window")
+    @patch.object(mdn, "is_target_window_active")
+    def test_probe_uses_shell_active_state_without_atspi_scan(
+        self, mock_active, mock_find, mock_shell_active, mock_wayland
+    ):
+        result = mdn.probe_target_window_activity(
+            target_window_id="",
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            app_hint="Antigravity",
+        )
+
+        self.assertEqual(result, ("", True))
+        mock_shell_active.assert_called_once_with(
+            caller_pid=900,
+            project_hint="project",
+            session_id="session-1",
+            app_hint="Antigravity",
+        )
+        mock_find.assert_not_called()
+        mock_active.assert_not_called()
+
 
 class TestWaylandWindowFocusAdapter(unittest.TestCase):
     """Tests GNOME Shell D-Bus activation without a blocking AT-SPI rescan."""
@@ -659,12 +702,30 @@ class TestWaylandWindowFocusAdapter(unittest.TestCase):
             project_hint="project",
             session_id="session-1",
             verify_timeout=0.05,
+            app_hint="Codex",
         ))
         command = mock_run.call_args.args[0]
-        self.assertIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindow", command)
+        self.assertIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindowV2", command)
         self.assertIn("900", command)
         self.assertIn("project", command)
+        self.assertIn("Codex", command)
         mock_windows.assert_not_called()
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "get_session_window_info", return_value=None)
+    @patch.object(mdn.subprocess, "run")
+    def test_shell_active_query_passes_antigravity_identity(self, mock_run, mock_session, mock_wayland):
+        mock_run.return_value = MagicMock(returncode=0, stdout="(false,)")
+
+        self.assertFalse(mdn.probe_wayland_target_window_activity(
+            caller_pid=901,
+            project_hint="project",
+            session_id="session-2",
+            app_hint="Antigravity",
+        ))
+        command = mock_run.call_args.args[0]
+        self.assertIn("io.github.sonnx24042005.AiAgentNotifier.IsWindowActive", command)
+        self.assertIn("Antigravity", command)
 
     @patch.object(mdn, "is_wayland_session", return_value=True)
     @patch.object(mdn, "get_session_window_info", return_value=None)
@@ -672,6 +733,25 @@ class TestWaylandWindowFocusAdapter(unittest.TestCase):
     def test_focus_wayland_target_reports_unavailable_adapter(self, mock_run, mock_session, mock_wayland):
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         self.assertFalse(mdn.focus_wayland_target_window(caller_pid=900, project_hint="project"))
+
+    @patch.object(mdn, "is_wayland_session", return_value=True)
+    @patch.object(mdn, "get_session_window_info", return_value=None)
+    @patch.object(mdn.subprocess, "run")
+    def test_focus_wayland_target_falls_back_to_v1_contract(self, mock_run, mock_session, mock_wayland):
+        mock_run.side_effect = [
+            MagicMock(returncode=1, stdout=""),
+            MagicMock(returncode=0, stdout="(true,)"),
+        ]
+
+        self.assertTrue(mdn.focus_wayland_target_window(
+            caller_pid=900,
+            project_hint="project",
+            app_hint="Antigravity",
+        ))
+        legacy_command = mock_run.call_args_list[1].args[0]
+        self.assertIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindow", legacy_command)
+        self.assertNotIn("io.github.sonnx24042005.AiAgentNotifier.FocusWindowV2", legacy_command)
+        self.assertEqual(legacy_command[-3:], ["900", "", ""])
 
     @patch.object(mdn, "is_wayland_session", return_value=True)
     @patch.object(mdn, "focus_wayland_target_window", return_value=True)
@@ -687,6 +767,7 @@ class TestWaylandWindowFocusAdapter(unittest.TestCase):
             project_hint="project",
             session_id="session-1",
             verify_timeout=0.8,
+            app_hint="",
         )
 
 

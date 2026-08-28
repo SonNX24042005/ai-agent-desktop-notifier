@@ -112,7 +112,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
         t1 = time.time() - 50
         t2 = time.time()
 
-        mdn.save_to_queue("key_0", {"target_window_id": "1000", "created_at": t0, "session_id": "s0"})
+        mdn.save_to_queue("key_0", {"target_window_id": "1000", "created_at": t0, "session_id": "s0", "app_name": "Codex"})
         mdn.save_to_queue("key_1", {"target_window_id": "2000", "created_at": t1, "session_id": "s1"})
         mdn.save_to_queue("key_2", {"target_window_id": "3000", "created_at": t2, "session_id": "s2"})
 
@@ -125,6 +125,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
                 caller_pid=0,
                 project_hint="",
                 session_id="s0",
+                app_hint="Codex",
                 allow_gdk=False,
             )
             q = mdn.load_notification_queue()
@@ -137,7 +138,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
     @patch.object(mdn, "is_wayland_session", return_value=False)
     def test_click_uses_target_snapshot_not_polluted_session_cache(self, mock_wayland, mock_focus, mock_valid):
         # Notification A was created with target_window_id "1001"
-        mdn.save_to_queue("key_A", {"target_window_id": "1001", "created_at": time.time(), "session_id": "sess_A"})
+        mdn.save_to_queue("key_A", {"target_window_id": "1001", "created_at": time.time(), "session_id": "sess_A", "app_name": "Codex"})
 
         # Session cache is then overwritten by session B with "2002"
         with patch.object(mdn, "is_developer_window", return_value=True):
@@ -147,13 +148,14 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
         with patch.object(mdn, "kill_previous_instance"), patch.object(mdn, "pop_next_notification_async"):
             ret = mdn.focus_active_or_queued_notification()
             self.assertEqual(ret, 0)
-            mock_focus.assert_called_with(
-                "1001",
-                caller_pid=0,
-                project_hint="",
-                session_id="sess_A",
-                allow_gdk=False,
-            )
+        mock_focus.assert_called_with(
+            "1001",
+            caller_pid=0,
+            project_hint="",
+            session_id="sess_A",
+            app_hint="Codex",
+            allow_gdk=False,
+        )
 
     def test_alt_q_uses_wayland_adapter_before_x11_scan(self):
         mdn.save_to_queue("key_wayland", {
@@ -162,6 +164,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
             "session_id": "sess_wayland",
             "caller_pid": 900,
             "project_hint": "project",
+            "app_name": "Antigravity",
         })
 
         with patch.object(mdn, "is_wayland_session", return_value=True), \
@@ -177,6 +180,7 @@ class TestActionControllerAndClickPreservation(unittest.TestCase):
             caller_pid=900,
             project_hint="project",
             session_id="sess_wayland",
+            app_hint="Antigravity",
             allow_gdk=False,
         )
 

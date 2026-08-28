@@ -42,6 +42,7 @@ if [ "$event_name" = "SessionStart" ] || [ "$notif_type" = "SessionStart" ]; the
         terminal_screen="${GNOME_TERMINAL_SCREEN:-}"
         "$PYTHON3" "$MULTI_NOTIFY" \
             --capture-session \
+            --app-name="Claude Code" \
             --session-id="$session_id" \
             --window-id="$caller_window" \
             --caller-pid="$caller_pid" \

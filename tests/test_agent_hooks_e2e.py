@@ -109,6 +109,7 @@ class TestAntigravityHooksE2E(BaseHookHarness):
                 calls = self.wait_for_captured_calls(min_count=prev_count + 1)
                 self.assertTrue(any("--capture-session" in call for call in calls))
                 capture_call = [c for c in calls if "--capture-session" in c][-1]
+                self.assertIn("--app-name=Antigravity", capture_call)
                 self.assertIn("--session-id=agy-conv-123", capture_call)
                 self.assertIn("--project-hint=my-project", capture_call)
 
@@ -222,6 +223,7 @@ class TestClaudeCodeHooksE2E(BaseHookHarness):
                 calls = self.wait_for_captured_calls(min_count=prev_count + 1)
                 self.assertTrue(any("--capture-session" in call for call in calls))
                 capture_call = [c for c in calls if "--capture-session" in c][-1]
+                self.assertIn("--app-name=Claude Code", capture_call)
                 self.assertIn("--session-id=claude-sess-101", capture_call)
                 self.assertIn("--project-hint=project-alpha", capture_call)
 
@@ -319,6 +321,7 @@ class TestCodexHooksE2E(BaseHookHarness):
         calls = self.wait_for_captured_calls(min_count=prev_count + 1)
         self.assertTrue(any("--capture-session" in call for call in calls))
         capture_call = [c for c in calls if "--capture-session" in c][-1]
+        self.assertIn("--app-name=Codex", capture_call)
         self.assertIn("--session-id=codex-sess-201", capture_call)
 
     def test_permission_request_notification(self):

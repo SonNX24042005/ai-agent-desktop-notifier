@@ -123,6 +123,7 @@ if "invocationNum" in data or event_name == "PreInvocation":
         cmd = [
             PYTHON3, MULTI_NOTIFY,
             "--capture-session",
+            "--app-name=Antigravity",
             f"--session-id={conversation_id}",
             f"--window-id={caller_win}",
             f"--caller-pid={os.getppid()}",

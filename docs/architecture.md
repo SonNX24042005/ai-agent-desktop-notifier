@@ -62,7 +62,7 @@ Các quyết định thiết kế chính:
 | `hooks/codex-notify.py` | Adapter Codex đa nền tảng | Khi hợp đồng `notify` hoặc hook của Codex thay đổi |
 | `hooks/antigravity-notify.sh` | Adapter Antigravity được cài trên Linux; tên có đuôi `.sh` nhưng nội dung là Python | Khi payload hoặc sự kiện Antigravity trên Linux thay đổi |
 | `hooks/antigravity-notify.py` | Adapter Antigravity được cài trên Windows | Khi payload hoặc sự kiện Antigravity trên Windows thay đổi |
-| `gnome-shell-extension/` | Adapter compositor dùng D-Bus để focus chính xác cửa sổ native Wayland trên GNOME Shell 42–50 | Khi thay đổi identity hoặc focus trên Wayland |
+| `gnome-shell-extension/` | Adapter compositor dùng D-Bus để focus và kiểm tra trạng thái active của cửa sổ native Wayland trên GNOME Shell 42–50 | Khi thay đổi identity, focus hoặc auto-dismiss trên Wayland |
 | `install.sh`, `install.ps1` | Cài file runtime, hợp nhất cấu hình agent và gửi thông báo thử | Khi thêm artifact, dependency hoặc tích hợp mới |
 | `update.sh`, `update.ps1` | Lấy bản mới và đồng bộ lại cài đặt | Khi quy trình phát hành hoặc migration thay đổi |
 | `uninstall.sh`, `uninstall.ps1` | Xóa artifact và cấu hình tích hợp | Khi installer bắt đầu sở hữu thêm dữ liệu |
@@ -84,7 +84,7 @@ Repository là nguồn phát triển, nhưng hook không chạy trực tiếp t�
 | Antigravity | `~/.gemini/hooks/notify-antigravity.sh` | `%USERPROFILE%\.gemini\hooks\notify-antigravity.py` |
 | Adapter focus Wayland | `~/.local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005` | Không áp dụng |
 
-Hệ quả quan trọng: sửa file trong repository không làm thay đổi bản đang chạy trong hồ sơ người dùng cho đến khi chạy lại installer hoặc updater.
+Hệ quả quan trọng: sửa file trong repository không làm thay đổi bản đang chạy trong hồ sơ người dùng cho đến khi chạy lại installer hoặc updater. Trên GNOME Wayland, mã JavaScript của extension đã nạp chỉ được thay thế hoàn toàn ở phiên Shell tiếp theo; `FocusWindow` ba tham số được giữ để engine tương thích với runtime v1 trong thời gian chuyển tiếp, còn runtime v2 bổ sung `FocusWindowV2` và `IsWindowActive`.
 
 ## 5. Thành phần và trách nhiệm
 
@@ -95,7 +95,7 @@ Adapter là lớp chống thay đổi giữa payload riêng của từng agent v
 1. Đọc JSON từ `stdin` hoặc đối số phù hợp với agent.
 2. Bỏ qua sự kiện nền, sự kiện không cần hành động và trạng thái khởi tạo im lặng.
 3. Nhận diện loại sự kiện: bắt đầu phiên, câu hỏi, yêu cầu quyền hoặc hoàn thành.
-4. Trích xuất `session_id`, PID gọi, cửa sổ đang hoạt động và tên dự án.
+4. Trích xuất `session_id`, PID gọi, cửa sổ đang hoạt động, tên dự án và identity agent.
 5. Chuyển payload thành tham số dòng lệnh chuẩn của engine.
 6. Khởi chạy engine bất đồng bộ, chuyển `stdout`, `stderr` và `stdin` sang thiết bị rỗng.
 
@@ -167,6 +167,8 @@ Payload khác nhau được chuẩn hóa thành các trường sau:
 | `--session-id` | Khóa ổn định để liên kết agent session với cửa sổ |
 | `--timeout` | Số giây tự đóng; `0` nghĩa là không tự đóng theo timeout |
 
+`--app-name` đồng thời được lưu thành `app_hint` khi bắt session và truyền xuyên suốt queue, nút đến cửa sổ, `anoti focus` và adapter Wayland. Identity này xử lý các trường hợp tên cửa sổ không chứa tên dự án, đặc biệt Codex desktop có class `Chatgpt` và Antigravity có class ứng dụng riêng.
+
 ## 7. Luồng xử lý chính
 
 ### 7.1. Bắt identity đầu phiên
@@ -219,9 +221,9 @@ stateDiagram-v2
     Next --> [*]: Queue rỗng
 ```
 
-Khi focus bằng `anoti focus`, engine duyệt từ item cũ nhất. Item chỉ bị xóa sau khi focus đã được xác minh thành công. Nếu không có queue hợp lệ, engine thử session cache mới cập nhật gần nhất. Engine không focus một cửa sổ developer ngẫu nhiên.
+Khi focus bằng `anoti focus` hoặc phím tắt toàn cục `Alt+Q`, engine duyệt từ item cũ nhất và chuyển `app_name` của item thành `app_hint` cho cùng bộ phân giải mà nút popup sử dụng. Item chỉ bị xóa sau khi focus đã được xác minh thành công. Nếu không có queue hợp lệ, engine thử session cache mới cập nhật gần nhất. Engine không focus một cửa sổ developer ngẫu nhiên.
 
-Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` để không tự động pop lại nhưng vẫn giữ trong queue để `anoti focus` kích hoạt được. Thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue. Cả hai backend dùng chung `update_auto_dismiss_state()` để chỉ đóng khi identity mục tiêu được xác nhận active liên tục đủ `auto_dismiss_delay` (mặc định 1,5 giây); khi người dùng chuyển sang cửa sổ khác, mốc thời gian được đặt lại. Việc phân giải và kiểm tra cửa sổ chạy qua `AsyncWindowActivityProbe` trên một luồng nền daemon, chỉ cho phép một lượt dò tại một thời điểm. Nút đến cửa sổ gửi một `AsyncWindowFocusRequest` single-flight riêng, chuyển sang trạng thái `Đang chuyển...` trong lúc xử lý; nếu focus thất bại popup vẫn mở và bật lại nút để thử lại, nếu thành công luồng giao diện mới đóng popup và chuyển queue. Trên GTK, khung nền bỏ qua sự kiện chuột bắt nguồn từ `Gtk.Button` hoặc widget con của nút để không đóng popup trước tín hiệu `clicked`. Luồng Tkinter/GTK chỉ lấy kết quả đã hoàn thành nên vẫn xử lý vẽ, đóng và sự kiện ngay cả khi API cửa sổ hoặc tiến trình con phản hồi chậm.
+Trong popup, thao tác focus thành công hoặc tự động đóng sau khi đã vào cửa sổ active (`auto-dismiss on active window`) sẽ giải phóng và xóa item khỏi queue. Cả hai backend dùng chung `update_auto_dismiss_state()` để chỉ đóng khi identity mục tiêu được xác nhận active liên tục đủ `auto_dismiss_delay` (mặc định 1,5 giây); khi người dùng chuyển sang cửa sổ khác, mốc thời gian được đặt lại. Trên GNOME Wayland, `AsyncWindowActivityProbe` gọi `IsWindowActive` của adapter compositor trước, tránh quét AT-SPI có thể treo; AT-SPI chỉ còn là fallback khi adapter không khả dụng. Nút đến cửa sổ gửi một `AsyncWindowFocusRequest` single-flight riêng và gọi cùng hợp đồng `FocusWindow` với `Alt+Q`; nút chuyển sang trạng thái `Đang chuyển...` trong lúc xử lý, bật lại nếu focus thất bại, còn popup chỉ đóng sau khi focus thành công. Trên GTK, khung nền bỏ qua sự kiện chuột bắt nguồn từ `Gtk.Button` hoặc widget con của nút để không đóng popup trước tín hiệu `clicked`. Luồng Tkinter/GTK chỉ lấy kết quả đã hoàn thành nên vẫn xử lý vẽ, đóng và sự kiện ngay cả khi API cửa sổ hoặc tiến trình con phản hồi chậm.
 
 ## 8. Thuật toán nhận diện cửa sổ và chính sách focus
 
@@ -237,6 +239,7 @@ Trong popup, thao tác đóng (`✕ Đóng`) đánh dấu `dismissed: true` đ�
 ### 8.1. Bộ đếm thời gian monotonic (1,5 giây active liên tục)
 - Sử dụng `time.monotonic()` và chu kỳ lấy kết quả 100 ms trên luồng giao diện.
 - Mỗi lượt dò identity và trạng thái active chạy trên luồng nền; probe mới không được tạo khi lượt trước còn chạy hoặc kết quả chưa được lấy.
+- Trên GNOME Wayland, adapter lấy cửa sổ focus trực tiếp từ compositor và đối chiếu PID, project, title cùng `app_hint`; `FocusWindowV2` chỉ kích hoạt ứng viên duy nhất ở tầng identity mạnh nhất, `FocusWindow` giữ tương thích v1, còn `IsWindowActive` chỉ kiểm tra cửa sổ đang focus và không làm thay đổi focus.
 - Các lệnh truy vấn cửa sổ X11 dùng timeout 0,75 giây để tiến trình con không bị treo vô hạn.
 - Trên X11 và Windows: Đối chiếu chính xác ID cửa sổ active (`_NET_ACTIVE_WINDOW` / `GetForegroundWindow`).
 - Trên Linux Wayland thuần: Đọc cửa sổ active qua AT-SPI và đối chiếu PID tổ tiên, project hint hoặc session fingerprint. PTY chỉ là fallback khi AT-SPI không khả dụng.

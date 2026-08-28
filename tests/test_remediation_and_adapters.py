@@ -355,6 +355,23 @@ class TestLifecycleArtifactSymmetry(unittest.TestCase):
         for script_name in ("install.sh", "update.sh", "uninstall.sh"):
             script = (ROOT_DIR / script_name).read_text(encoding="utf-8")
             self.assertIn(extension_uuid, script)
+        for script_name in ("install.sh", "update.sh"):
+            script = (ROOT_DIR / script_name).read_text(encoding="utf-8")
+            self.assertIn("GNOME_DESIRED_VERSION", script)
+            self.assertIn("GNOME_RUNTIME_VERSION", script)
+
+    def test_gnome_focus_adapter_exposes_focus_and_active_contract(self):
+        metadata = json.loads(
+            (ROOT_DIR / "gnome-shell-extension" / "metadata.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(metadata["uuid"], "ai-agent-desktop-notifier@sonnx24042005")
+        for filename in ("extension-modern.js", "extension-legacy.js"):
+            source = (ROOT_DIR / "gnome-shell-extension" / filename).read_text(encoding="utf-8")
+            self.assertIn('name="appHint"', source)
+            self.assertIn('name="FocusWindowV2"', source)
+            self.assertIn('name="IsWindowActive"', source)
+            self.assertIn("'chatgpt'", source)
+            self.assertIn("'antigravity'", source)
 
 
 class TestWaylandControllingTTYAndDismiss(unittest.TestCase):

@@ -70,6 +70,7 @@ if event_name == "SessionStart" or notif_type == "SessionStart":
         cmd = [
             PYTHON3, MULTI_NOTIFY,
             "--capture-session",
+            "--app-name=Claude Code",
             f"--session-id={session_id}",
             f"--window-id={caller_win}",
             f"--caller-pid={os.getppid()}",

@@ -144,6 +144,7 @@ def handle_hook(payload):
             cmd = [
                 PYTHON3, MULTI_NOTIFY,
                 "--capture-session",
+                "--app-name=Codex",
                 f"--session-id={session_id}",
                 f"--window-id={caller_win}",
                 f"--caller-pid={caller_pid}",

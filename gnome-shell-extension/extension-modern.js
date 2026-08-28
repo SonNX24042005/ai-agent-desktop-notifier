@@ -16,11 +16,26 @@ const INTERFACE_XML = `
       <arg type="s" name="titleFingerprint" direction="in"/>
       <arg type="b" name="focused" direction="out"/>
     </method>
+    <method name="FocusWindowV2">
+      <arg type="u" name="callerPid" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="focused" direction="out"/>
+    </method>
+    <method name="IsWindowActive">
+      <arg type="u" name="callerPid" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="active" direction="out"/>
+    </method>
   </interface>
 </node>`;
 
 const DEVELOPER_CLASSES = [
     'code', 'vscodium', 'cursor', 'windsurf', 'antigravity', 'zed',
+    'chatgpt', 'codex',
     'gnome-terminal', 'tilix', 'alacritty', 'kitty', 'wezterm', 'konsole',
     'ptyxis', 'kgx', 'pycharm', 'idea', 'clion', 'webstorm', 'goland',
     'phpstorm', 'rider', 'rubymine', 'datagrip', 'fleet', 'sublime_text',
@@ -81,9 +96,24 @@ function isSupportedWindow(window) {
         windowType === Meta.WindowType.MODAL_DIALOG;
 }
 
-function matchesTarget(window, callerPid, projectHint, titleFingerprint) {
+function appIdentity(window) {
+    return `${normalize(window.get_wm_class?.())} ${normalize(window.get_gtk_application_id?.())}`;
+}
+
+function matchesAppHint(window, appHint) {
+    const sourceApp = normalize(appHint);
+    const identity = appIdentity(window);
+    if (sourceApp === 'antigravity')
+        return identity.includes('antigravity');
+    if (sourceApp === 'codex')
+        return ['chatgpt', 'codex']
+            .some(item => identity.includes(item));
+    return false;
+}
+
+function targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint) {
     if (!isSupportedWindow(window) || !isDeveloperWindow(window))
-        return false;
+        return 0;
 
     const title = normalize(window.get_title());
     const hint = normalize(projectHint);
@@ -92,8 +122,14 @@ function matchesTarget(window, callerPid, projectHint, titleFingerprint) {
     const pidMatches = isPidInAncestry(window.get_pid(), callerPid);
 
     if (pidMatches)
-        return hint || titleFingerprint ? titleMatches : true;
-    return titleMatches;
+        return 3;
+    if (titleMatches)
+        return 2;
+    return matchesAppHint(window, appHint) ? 1 : 0;
+}
+
+function matchesTarget(window, callerPid, projectHint, titleFingerprint, appHint) {
+    return targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint) > 0;
 }
 
 export default class AiAgentNotifierWindowFocus extends Extension {
@@ -123,15 +159,38 @@ export default class AiAgentNotifierWindowFocus extends Extension {
         }
     }
 
-    FocusWindow(callerPid, projectHint, titleFingerprint) {
-        const candidates = global.get_window_actors()
+    _focusWindow(callerPid, projectHint, titleFingerprint, appHint) {
+        const scoredCandidates = global.get_window_actors()
             .map(actor => actor.get_meta_window())
-            .filter(window => matchesTarget(window, callerPid, projectHint, titleFingerprint));
+            .map(window => ({
+                window,
+                strength: targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint),
+            }))
+            .filter(candidate => candidate.strength > 0);
+
+        const bestStrength = scoredCandidates.reduce(
+            (best, candidate) => Math.max(best, candidate.strength),
+            0
+        );
+        const candidates = scoredCandidates.filter(candidate => candidate.strength === bestStrength);
 
         if (candidates.length !== 1)
             return false;
 
-        Main.activateWindow(candidates[0], global.get_current_time());
+        Main.activateWindow(candidates[0].window, global.get_current_time());
         return true;
+    }
+
+    FocusWindow(callerPid, projectHint, titleFingerprint) {
+        return this._focusWindow(callerPid, projectHint, titleFingerprint, '');
+    }
+
+    FocusWindowV2(callerPid, projectHint, titleFingerprint, appHint) {
+        return this._focusWindow(callerPid, projectHint, titleFingerprint, appHint);
+    }
+
+    IsWindowActive(callerPid, projectHint, titleFingerprint, appHint) {
+        const activeWindow = global.display.get_focus_window?.() ?? global.display.focus_window ?? null;
+        return matchesTarget(activeWindow, callerPid, projectHint, titleFingerprint, appHint);
     }
 }

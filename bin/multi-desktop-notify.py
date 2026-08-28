@@ -212,6 +212,7 @@ DEVELOPER_CLASSES = {
     "cascadia_hosting_window_class", "consolewindowclass", "mintty",
     # IDEs & Editors
     "code", "vscodium", "cursor", "windsurf", "antigravity", "zed",
+    "chatgpt", "codex",
     "pycharm", "pycharm-community", "idea", "idea-ce", "clion", "webstorm",
     "goland", "phpstorm", "rider", "rubymine", "datagrip", "fleet",
     "sublime_text", "subl", "gedit", "kate", "emacs", "neovim", "gvim",
@@ -234,6 +235,7 @@ WIN_DEVELOPER_EXES = [
     "cmd.exe", "powershell.exe", "pwsh.exe", "alacritty.exe", "wezterm-gui.exe",
     "idea64.exe", "pycharm64.exe", "clion64.exe", "webstorm64.exe", "rider64.exe",
     "goland64.exe", "mintty.exe", "conemu64.exe", "conemu.exe", "antigravity.exe",
+    "chatgpt.exe", "codex.exe",
 ]
 
 
@@ -1447,7 +1449,7 @@ def is_developer_app_name(app_name):
     )
 
 
-def wayland_window_matches_target(window_info, target_wid="", caller_pid=0, project_hint="", session_id=""):
+def wayland_window_matches_target(window_info, target_wid="", caller_pid=0, project_hint="", session_id="", app_hint=""):
     """Matches an active AT-SPI window to the notification source identity."""
     if not isinstance(window_info, dict):
         return False
@@ -1469,6 +1471,12 @@ def wayland_window_matches_target(window_info, target_wid="", caller_pid=0, proj
         if app_hint and app_hint in app_name and (not hint or hint in title):
             return True
 
+    source_app = str(app_hint or "").strip().lower()
+    if source_app == "antigravity" and "antigravity" in app_name:
+        return True
+    if source_app == "codex" and any(name in app_name for name in ("chatgpt", "codex")):
+        return True
+
     caller = int(caller_pid or 0)
     if caller > 1 and active_pid > 1 and is_pid_in_ancestry(active_pid, caller):
         return not hint or hint in title
@@ -1476,7 +1484,7 @@ def wayland_window_matches_target(window_info, target_wid="", caller_pid=0, proj
     return bool(hint and hint in title and is_developer_app_name(app_name))
 
 
-def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id="", wayland_windows=None):
+def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hint="", session_id="", wayland_windows=None, app_hint=""):
     """Checks if active_wid corresponds to the target application window that triggered the notification."""
     # 1. Direct match with active_wid if active_wid is available (X11 / Windows)
     if active_wid:
@@ -1527,6 +1535,7 @@ def is_target_window_active(active_wid, target_wid="", caller_pid=0, project_hin
                     caller_pid=caller_pid,
                     project_hint=project_hint,
                     session_id=session_id,
+                    app_hint=app_hint,
                 )
                 for window_info in detected_windows
             )
@@ -1549,9 +1558,60 @@ def update_auto_dismiss_state(active_since, is_active, delay, now=None):
     return active_since, (current_time - active_since) >= delay
 
 
-def probe_target_window_activity(target_window_id="", caller_pid=0, project_hint="", session_id=""):
+def probe_wayland_target_window_activity(caller_pid=0, project_hint="", session_id="", app_hint=""):
+    """Returns native Wayland focus state, or None when the Shell adapter is unavailable."""
+    if IS_WINDOWS or not is_wayland_session():
+        return None
+
+    session_info = get_session_window_info(session_id) if session_id else None
+    title_fingerprint = ""
+    if isinstance(session_info, dict):
+        title_fingerprint = str(session_info.get("title_fingerprint") or "").strip()
+        if not app_hint:
+            app_hint = str(session_info.get("app_hint") or "").strip()
+
+    try:
+        result = subprocess.run(
+            [
+                "gdbus", "call", "--session",
+                "--dest", "io.github.sonnx24042005.AiAgentNotifier",
+                "--object-path", "/io/github/sonnx24042005/AiAgentNotifier",
+                "--method", "io.github.sonnx24042005.AiAgentNotifier.IsWindowActive",
+                str(max(int(caller_pid or 0), 0)),
+                str(project_hint or "")[:300],
+                title_fingerprint[:500],
+                str(app_hint or "")[:100],
+            ],
+            capture_output=True,
+            text=True,
+            timeout=0.75,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+    output = result.stdout.lower()
+    if "true" in output:
+        return True
+    if "false" in output:
+        return False
+    return None
+
+
+def probe_target_window_activity(target_window_id="", caller_pid=0, project_hint="", session_id="", app_hint=""):
     """Resolves the target and checks its active state outside the UI thread."""
     resolved_target = target_window_id
+    compositor_result = probe_wayland_target_window_activity(
+        caller_pid=caller_pid,
+        project_hint=project_hint,
+        session_id=session_id,
+        app_hint=app_hint,
+    )
+    if compositor_result is not None:
+        return resolved_target, compositor_result
+
     if not resolved_target or not is_valid_toplevel_window(resolved_target):
         resolved_target = find_target_window(
             window_id_arg="",
@@ -1567,6 +1627,7 @@ def probe_target_window_activity(target_window_id="", caller_pid=0, project_hint
         caller_pid=caller_pid,
         project_hint=project_hint,
         session_id=session_id,
+        app_hint=app_hint,
     )
     return resolved_target, target_is_active
 
@@ -1580,7 +1641,7 @@ class AsyncWindowActivityProbe:
         self._running = False
         self._result = None
 
-    def request(self, target_window_id="", caller_pid=0, project_hint="", session_id=""):
+    def request(self, target_window_id="", caller_pid=0, project_hint="", session_id="", app_hint=""):
         """Starts a daemon probe unless one is running or awaiting consumption."""
         with self._lock:
             if self._running or self._result is not None:
@@ -1589,20 +1650,21 @@ class AsyncWindowActivityProbe:
 
         worker = threading.Thread(
             target=self._run,
-            args=(target_window_id, caller_pid, project_hint, session_id),
+            args=(target_window_id, caller_pid, project_hint, session_id, app_hint),
             daemon=True,
             name="notifier-window-activity",
         )
         worker.start()
         return True
 
-    def _run(self, target_window_id, caller_pid, project_hint, session_id):
+    def _run(self, target_window_id, caller_pid, project_hint, session_id, app_hint):
         try:
             result = self._probe_func(
                 target_window_id=target_window_id,
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
+                app_hint=app_hint,
             )
         except Exception:
             result = (target_window_id, False)
@@ -1619,18 +1681,19 @@ class AsyncWindowActivityProbe:
             return result
 
 
-def focus_target_window_async_task(target_window_id="", caller_pid=0, project_hint="", session_id=""):
+def focus_target_window_async_task(target_window_id="", caller_pid=0, project_hint="", session_id="", app_hint=""):
     """Resolves and focuses a target without calling GDK from the worker thread."""
     return focus_notification_target(
         target_window_id=target_window_id,
         caller_pid=caller_pid,
         project_hint=project_hint,
         session_id=session_id,
+        app_hint=app_hint,
         allow_gdk=False,
     )
 
 
-def focus_notification_target(target_window_id="", caller_pid=0, project_hint="", session_id="", allow_gdk=False):
+def focus_notification_target(target_window_id="", caller_pid=0, project_hint="", session_id="", allow_gdk=False, app_hint=""):
     """Focuses through the Wayland adapter first, then resolves an X11 fallback."""
     resolved_target = target_window_id
 
@@ -1640,6 +1703,7 @@ def focus_notification_target(target_window_id="", caller_pid=0, project_hint=""
             caller_pid=caller_pid,
             project_hint=project_hint,
             session_id=session_id,
+            app_hint=app_hint,
             allow_gdk=allow_gdk,
         )
         if focused:
@@ -1660,6 +1724,7 @@ def focus_notification_target(target_window_id="", caller_pid=0, project_hint=""
         caller_pid=caller_pid,
         project_hint=project_hint,
         session_id=session_id,
+        app_hint=app_hint,
         allow_gdk=allow_gdk,
     )
     return resolved_target, focused
@@ -1771,7 +1836,7 @@ def switch_to_window_workspace(wid):
     return True
 
 
-def focus_wayland_target_window(caller_pid=0, project_hint="", session_id="", verify_timeout=0.8):
+def focus_wayland_target_window(caller_pid=0, project_hint="", session_id="", verify_timeout=0.8, app_hint=""):
     """Requests exact native Wayland activation through the GNOME Shell adapter."""
     if IS_WINDOWS or not is_wayland_session():
         return False
@@ -1780,36 +1845,55 @@ def focus_wayland_target_window(caller_pid=0, project_hint="", session_id="", ve
     title_fingerprint = ""
     if isinstance(session_info, dict):
         title_fingerprint = str(session_info.get("title_fingerprint") or "").strip()
+        if not app_hint:
+            app_hint = str(session_info.get("app_hint") or "").strip()
 
-    try:
-        result = subprocess.run(
-            [
-                "gdbus", "call", "--session",
-                "--dest", "io.github.sonnx24042005.AiAgentNotifier",
-                "--object-path", "/io/github/sonnx24042005/AiAgentNotifier",
-                "--method", "io.github.sonnx24042005.AiAgentNotifier.FocusWindow",
-                str(max(int(caller_pid or 0), 0)),
-                str(project_hint or "")[:300],
-                title_fingerprint[:500],
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1.0,
-            check=False,
-        )
-    except Exception:
+    def call_adapter(method_name, arguments):
+        try:
+            return subprocess.run(
+                [
+                    "gdbus", "call", "--session",
+                    "--dest", "io.github.sonnx24042005.AiAgentNotifier",
+                    "--object-path", "/io/github/sonnx24042005/AiAgentNotifier",
+                    "--method", f"io.github.sonnx24042005.AiAgentNotifier.{method_name}",
+                    *arguments,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                check=False,
+            )
+        except Exception:
+            return None
+
+    result = call_adapter(
+        "FocusWindowV2",
+        [
+            str(max(int(caller_pid or 0), 0)),
+            str(project_hint or "")[:300],
+            title_fingerprint[:500],
+            str(app_hint or "")[:100],
+        ],
+    )
+    if result is not None and result.returncode == 0 and "true" in result.stdout.lower():
+        return True
+
+    # Runtime v1 remains loaded until the next GNOME Wayland login. Its three-
+    # argument method can still focus a unique PID-related Antigravity window.
+    legacy_result = call_adapter(
+        "FocusWindow",
+        [
+            str(max(int(caller_pid or 0), 0)),
+            "",
+            "",
+        ],
+    )
+    if legacy_result is None:
         return False
-
-    if result.returncode != 0 or "true" not in result.stdout.lower():
-        return False
-
-    # The compositor adapter activates a unique verified target before returning
-    # true. Avoid a second AT-SPI scan here because accessibility clients can
-    # block indefinitely on an unresponsive application.
-    return True
+    return legacy_result.returncode == 0 and "true" in legacy_result.stdout.lower()
 
 
-def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_hint="", session_id="", allow_gdk=True):
+def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_hint="", session_id="", allow_gdk=True, app_hint=""):
     """Activates and brings to front the specified target window ID.
     Returns True if focus activation was successfully verified, False otherwise.
     """
@@ -1820,6 +1904,7 @@ def focus_target_window(window_id="", verify_timeout=0.4, caller_pid=0, project_
         project_hint=project_hint,
         session_id=session_id,
         verify_timeout=max(verify_timeout, 0.8),
+        app_hint=app_hint,
     ):
         return True
 
@@ -1977,6 +2062,7 @@ def focus_active_or_queued_notification():
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
+                app_hint=item.get("app_name", ""),
                 allow_gdk=False,
             )
             if focused:
@@ -2002,6 +2088,7 @@ def focus_active_or_queued_notification():
                     caller_pid=sinfo.get("pid", 0),
                     project_hint=sinfo.get("project_hint", ""),
                     session_id=sid,
+                    app_hint=sinfo.get("app_hint", ""),
                 ):
                     kill_previous_instance()
                     return 0
@@ -2199,6 +2286,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
             caller_pid=caller_pid,
             project_hint=project_hint,
             session_id=session_id,
+            app_hint=app_name,
         )
         if started:
             set_focus_pending(True)
@@ -2354,6 +2442,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
+                app_hint=app_name,
             )
 
             root.after(100, check_active_timer)
@@ -2363,6 +2452,7 @@ def show_multi_monitor_popup_windows(app_name, title, message, questions_json=""
             caller_pid=caller_pid,
             project_hint=project_hint,
             session_id=session_id,
+            app_hint=app_name,
         )
         root.after(100, check_active_timer)
 
@@ -2654,6 +2744,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
+                app_hint=app_name,
             )
             if started:
                 set_focus_pending(True)
@@ -2901,6 +2992,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                     caller_pid=caller_pid,
                     project_hint=project_hint,
                     session_id=session_id,
+                    app_hint=app_name,
                 )
 
                 return True
@@ -2910,6 +3002,7 @@ def show_multi_monitor_popup_linux(app_name, title, message, questions_json="", 
                 caller_pid=caller_pid,
                 project_hint=project_hint,
                 session_id=session_id,
+                app_hint=app_name,
             )
             GLib.timeout_add(100, check_target_window_active_timer)
 
@@ -3080,6 +3173,7 @@ def main():
                 project_hint=args.project_hint,
                 pid=args.caller_pid,
                 precision="window",
+                app_hint=args.app_name,
             )
         return
 

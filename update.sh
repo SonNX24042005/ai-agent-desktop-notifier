@@ -104,7 +104,13 @@ if command -v gnome-shell &>/dev/null && [ -d "$SCRIPT_DIR/gnome-shell-extension
     fi
     if command -v gnome-extensions &>/dev/null; then
         if gnome-extensions enable "$GNOME_EXTENSION_UUID" &>/dev/null; then
-            echo "✓ Reloaded GNOME Shell window focus adapter"
+            GNOME_DESIRED_VERSION="$(sed -n 's/.*"version":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$GNOME_EXTENSION_DIR/metadata.json" | head -n 1)"
+            GNOME_RUNTIME_VERSION="$(gnome-extensions info "$GNOME_EXTENSION_UUID" 2>/dev/null | sed -n 's/^[[:space:]]*Version:[[:space:]]*//p' | head -n 1)"
+            if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] && [ -n "$GNOME_DESIRED_VERSION" ] && [ "$GNOME_RUNTIME_VERSION" != "$GNOME_DESIRED_VERSION" ]; then
+                echo "Warning: Log out and back in once to load the updated GNOME Shell window focus adapter."
+            else
+                echo "✓ Reloaded GNOME Shell window focus adapter"
+            fi
         else
             queue_gnome_extension_enable
             echo "Warning: Log out and back in once to load the GNOME Shell window focus adapter."
