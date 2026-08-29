@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use anoti_core::{
     CandidateEvidence, FocusOutcome, NotificationRequest, PlatformCapabilities, WindowCandidate,
-    WindowIdentity, normalize_pid_chain, resolve_candidate, titles_compatible,
+    WindowIdentity, generate_window_instance_id, normalize_pid_chain, resolve_candidate,
+    titles_compatible,
 };
 use anoti_platform::{IdentityQuery, OverlayOutcome, PlatformBackend, PlatformError, WindowTarget};
 
@@ -52,6 +53,7 @@ pub trait WindowsApi: Send + Sync {
     fn window_pid(&self, handle: u64) -> Result<u32, PlatformError>;
     fn window_title(&self, handle: u64) -> Result<String, PlatformError>;
     fn process_ancestry(&self, start_pid: u32) -> Result<Vec<u32>, PlatformError>;
+    fn process_start_time(&self, pid: u32) -> Result<u64, PlatformError>;
     /// Requests activation. Callers must independently verify foreground state.
     fn request_activation(&self, handle: u64) -> Result<(), PlatformError>;
     fn enumerate_monitors(&self) -> Result<Vec<MonitorArea>, PlatformError>;
@@ -87,6 +89,10 @@ impl WindowsApi for SystemWindowsApi {
 
     fn process_ancestry(&self, start_pid: u32) -> Result<Vec<u32>, PlatformError> {
         native::process_ancestry(start_pid)
+    }
+
+    fn process_start_time(&self, pid: u32) -> Result<u64, PlatformError> {
+        native::process_start_time(pid)
     }
 
     fn request_activation(&self, handle: u64) -> Result<(), PlatformError> {
@@ -129,6 +135,9 @@ impl WindowsApi for SystemWindowsApi {
     }
     fn process_ancestry(&self, _start_pid: u32) -> Result<Vec<u32>, PlatformError> {
         Err(unavailable())
+    }
+    fn process_start_time(&self, _pid: u32) -> Result<u64, PlatformError> {
+        Ok(0)
     }
     fn request_activation(&self, _handle: u64) -> Result<(), PlatformError> {
         Err(unavailable())
@@ -199,10 +208,25 @@ impl<A: WindowsApi> WindowsBackend<A> {
             .api
             .enumerate_windows()?
             .into_iter()
-            .filter(|window| window.visible && !window.owned && !window.tool_window)
+            .filter(|window| {
+                (window.visible || window.minimized) && !window.owned && !window.tool_window
+            })
             .map(|window| {
                 let id = window.handle.to_string();
+                let current_start_time = self.api.process_start_time(window.pid).unwrap_or(0);
                 let direct_id_match = !query.window_id.is_empty() && query.window_id == id;
+                let pid_reused = query.process_start_time > 0
+                    && current_start_time > 0
+                    && query.process_start_time != current_start_time;
+                let stale = direct_id_match
+                    && ((query.window_pid > 0 && query.window_pid != window.pid) || pid_reused);
+                let exact_instance_match = direct_id_match
+                    && !stale
+                    && (query.window_pid == 0 || query.window_pid == window.pid);
+                let session_match = !query.session_id.is_empty()
+                    && direct_id_match
+                    && !stale
+                    && (query.window_pid == 0 || query.window_pid == window.pid);
                 let project_match = !query.project_hint.trim().is_empty()
                     && window
                         .title
@@ -211,19 +235,27 @@ impl<A: WindowsApi> WindowsBackend<A> {
                 let title_match = !query.title_fingerprint.trim().is_empty()
                     && titles_compatible(&query.title_fingerprint, &window.title);
                 let app_match = app_matches(&window.class_name, &query.app_hint);
+                let instance_id = if direct_id_match && !query.window_instance_id.is_empty() {
+                    query.window_instance_id.clone()
+                } else {
+                    String::new()
+                };
                 WindowCandidate {
                     id,
+                    instance_id,
                     pid: window.pid,
                     title: window.title,
                     app_id: window.class_name.clone(),
+                    generation: query.generation,
                     evidence: CandidateEvidence {
-                        session_match: !query.session_id.is_empty() && direct_id_match,
+                        exact_instance_match,
+                        session_match,
                         pid_match: ancestry.contains(&window.pid),
                         project_match,
-                        direct_id_match,
+                        direct_id_match: direct_id_match && !stale,
                         app_match,
                         title_match,
-                        stale: false,
+                        stale,
                         developer_window: is_developer_window(&window.class_name),
                     },
                 }
@@ -240,10 +272,14 @@ impl<A: WindowsApi> WindowsBackend<A> {
         if target.pid > 0 && current_pid > 0 && target.pid != current_pid {
             return Ok(false);
         }
-        let current_title = self.api.window_title(handle)?;
-        Ok(!target.title.is_empty()
-            && !current_title.is_empty()
-            && titles_compatible(&target.title, &current_title))
+        let current_start_time = self.api.process_start_time(current_pid).unwrap_or(0);
+        if target.process_start_time > 0
+            && current_start_time > 0
+            && target.process_start_time != current_start_time
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 }
 
@@ -289,15 +325,24 @@ impl<A: WindowsApi> PlatformBackend for WindowsBackend<A> {
         {
             return Ok(None);
         }
+        let current_start_time = self.api.process_start_time(window.pid).unwrap_or(0);
+        let instance_id = if query.window_instance_id.is_empty() {
+            generate_window_instance_id()
+        } else {
+            query.window_instance_id.clone()
+        };
         Ok(Some(WindowIdentity {
             window_id: window.handle.to_string(),
+            window_instance_id: instance_id,
             window_pid: window.pid,
+            process_start_time: current_start_time,
             caller_pid: query.caller_pid,
             caller_pid_chain: ancestry,
             project_hint: query.project_hint.clone(),
             title_fingerprint: window.title,
             app_hint: query.app_hint.clone(),
             session_id: query.session_id.clone(),
+            generation: query.generation,
         }))
     }
 
@@ -310,9 +355,12 @@ impl<A: WindowsApi> PlatformBackend for WindowsBackend<A> {
             .map(|candidate| {
                 candidate.map(|candidate| WindowTarget {
                     id: candidate.id.clone(),
+                    instance_id: candidate.instance_id.clone(),
                     pid: candidate.pid,
+                    process_start_time: 0,
                     title: candidate.title.clone(),
                     app_id: candidate.app_id.clone(),
+                    generation: candidate.generation,
                 })
             })
     }
@@ -331,10 +379,16 @@ impl<A: WindowsApi> PlatformBackend for WindowsBackend<A> {
     fn focus(
         &self,
         target: &WindowTarget,
-        _query: &IdentityQuery,
+        query: &IdentityQuery,
     ) -> Result<FocusOutcome, PlatformError> {
         if !self.validate_target(target)? {
             return Ok(FocusOutcome::NotFound);
+        }
+        let inventory = self.inventory(query)?;
+        if let Some(candidate) = inventory.iter().find(|c| c.id == target.id) {
+            if candidate.evidence.stale {
+                return Ok(FocusOutcome::NotFound);
+            }
         }
         let handle = parse_handle(&target.id)?;
         self.api.request_activation(handle)?;
@@ -434,6 +488,7 @@ pub fn toast_registration_plan() -> ToastRegistrationPlan {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Mutex;
 
     use super::*;
@@ -443,6 +498,7 @@ mod tests {
         windows: Vec<NativeWindow>,
         foreground: Mutex<Option<u64>>,
         activation_succeeds: bool,
+        start_times: Mutex<HashMap<u32, u64>>,
     }
 
     impl WindowsApi for FakeApi {
@@ -471,6 +527,13 @@ mod tests {
         }
         fn process_ancestry(&self, start_pid: u32) -> Result<Vec<u32>, PlatformError> {
             Ok(vec![start_pid, 200, 100])
+        }
+        fn process_start_time(&self, pid: u32) -> Result<u64, PlatformError> {
+            if pid == 0 {
+                Ok(0)
+            } else {
+                Ok(*self.start_times.lock().unwrap().get(&pid).unwrap_or(&1000))
+            }
         }
         fn request_activation(&self, handle: u64) -> Result<(), PlatformError> {
             if self.activation_succeeds {
@@ -518,8 +581,10 @@ mod tests {
         IdentityQuery {
             caller_pid: 300,
             caller_pid_chain: vec![300, 200, 100],
+            process_start_time: 1000,
             project_hint: "project".to_owned(),
             app_hint: "codex".to_owned(),
+            generation: 1,
             ..IdentityQuery::default()
         }
     }
@@ -530,6 +595,7 @@ mod tests {
             windows: vec![window(10, 200, "project - Codex")],
             foreground: Mutex::new(None),
             activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
         };
         let backend = WindowsBackend::new(api);
         let target = backend.resolve_target(&query()).unwrap().unwrap();
@@ -547,6 +613,7 @@ mod tests {
             windows: vec![window(10, 200, "project - Codex")],
             foreground: Mutex::new(None),
             activation_succeeds: false,
+            start_times: Mutex::new(HashMap::new()),
         };
         let backend = WindowsBackend::new(api).with_focus_timeout(Duration::from_millis(1));
         let target = backend.resolve_target(&query()).unwrap().unwrap();
@@ -565,6 +632,7 @@ mod tests {
             ],
             foreground: Mutex::new(None),
             activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
         };
         assert!(WindowsBackend::new(api).resolve_target(&query()).is_err());
 
@@ -572,13 +640,17 @@ mod tests {
             windows: vec![window(10, 999, "unrelated")],
             foreground: Mutex::new(None),
             activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
         };
         let backend = WindowsBackend::new(api);
         let target = WindowTarget {
             id: "10".to_owned(),
+            instance_id: "win32:10:200:1:1000".to_owned(),
             pid: 200,
+            process_start_time: 1000,
             title: "project - Codex".to_owned(),
             app_id: String::new(),
+            generation: 1,
         };
         assert_eq!(
             backend.focus(&target, &query()).unwrap(),
@@ -592,6 +664,7 @@ mod tests {
             windows: vec![window(10, 200, "project - Codex")],
             foreground: Mutex::new(Some(10)),
             activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
         };
         let identity = WindowsBackend::new(api)
             .capture_identity(&query())
@@ -608,6 +681,7 @@ mod tests {
             windows: Vec::new(),
             foreground: Mutex::new(None),
             activation_succeeds: false,
+            start_times: Mutex::new(HashMap::new()),
         };
         let monitors = api.enumerate_monitors().unwrap();
         assert_eq!(monitors[0].left, -1920);
@@ -615,5 +689,190 @@ mod tests {
         let plan = toast_registration_plan();
         assert_eq!(plan.install_registry_keys, plan.uninstall_registry_keys);
         assert_eq!(plan.app_user_model_id, APP_USER_MODEL_ID);
+    }
+
+    #[test]
+    fn windows_exact_instance_resolves_when_multiple_windows_share_pid_and_title() {
+        let api = FakeApi {
+            windows: vec![
+                window(10, 200, "project - Codex"),
+                window(11, 200, "project - Codex"),
+            ],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let mut q = query();
+        q.window_id = "11".to_owned();
+        q.window_instance_id = "uuid-11".to_owned();
+        let target = WindowsBackend::new(api)
+            .resolve_target(&q)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.id, "11");
+        assert_eq!(target.instance_id, "uuid-11");
+    }
+
+    #[test]
+    fn windows_title_change_does_not_fail_validation() {
+        let api = FakeApi {
+            windows: vec![window(10, 200, "New Dynamic Terminal Title")],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let backend = WindowsBackend::new(api);
+        let target = WindowTarget {
+            id: "10".to_owned(),
+            instance_id: "win32:10:200:1:1000".to_owned(),
+            pid: 200,
+            process_start_time: 1000,
+            title: "Original Title".to_owned(),
+            app_id: "CASCADIA_HOSTING_WINDOW_CLASS".to_owned(),
+            generation: 1,
+        };
+        assert!(backend.validate_target(&target).unwrap());
+    }
+
+    #[test]
+    fn windows_minimized_window_is_included_in_inventory() {
+        let mut minimized_win = window(12, 200, "project - Codex");
+        minimized_win.visible = false;
+        minimized_win.minimized = true;
+
+        let api = FakeApi {
+            windows: vec![minimized_win],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let mut q = query();
+        q.window_id = "12".to_owned();
+        let target = WindowsBackend::new(api)
+            .resolve_target(&q)
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.id, "12");
+    }
+
+    #[test]
+    fn windows_handle_reuse_with_different_pid_is_rejected_as_stale() {
+        let api = FakeApi {
+            windows: vec![window(10, 999, "unrelated")], // HWND 10 reused by unrelated PID 999
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let backend = WindowsBackend::new(api);
+        let mut q = query();
+        q.window_id = "10".to_owned();
+        q.window_pid = 200;
+        q.window_instance_id = "win32:10:200:1:1000".to_owned();
+
+        assert!(backend.resolve_target(&q).unwrap().is_none());
+
+        let target = WindowTarget {
+            id: "10".to_owned(),
+            instance_id: "win32:10:200:1:1000".to_owned(),
+            pid: 200,
+            process_start_time: 1000,
+            title: "project - Codex".to_owned(),
+            app_id: "CASCADIA_HOSTING_WINDOW_CLASS".to_owned(),
+            generation: 1,
+        };
+        assert_eq!(backend.focus(&target, &q).unwrap(), FocusOutcome::NotFound);
+    }
+
+    #[test]
+    fn windows_exact_instance_resolves_and_focuses_when_title_changed_completely() {
+        let api = FakeApi {
+            windows: vec![window(
+                10,
+                200,
+                "completely different dynamic title - PowerShell",
+            )],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let backend = WindowsBackend::new(api);
+        let mut q = query();
+        q.window_id = "10".to_owned();
+        q.window_pid = 200;
+        q.title_fingerprint = "project - Codex".to_owned();
+        q.window_instance_id = "win32:10:200:1:1000".to_owned();
+
+        let target = backend.resolve_target(&q).unwrap().unwrap();
+        assert_eq!(target.id, "10");
+        assert_eq!(target.instance_id, "win32:10:200:1:1000");
+        assert_eq!(
+            backend.focus(&target, &q).unwrap(),
+            FocusOutcome::Focused {
+                window_id: "10".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn windows_pid_reuse_after_restart_is_rejected_as_stale() {
+        let api = FakeApi {
+            windows: vec![window(10, 200, "project - Codex")],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        // Process restarted and got new start_time 3000
+        api.start_times.lock().unwrap().insert(200, 3000);
+        let backend = WindowsBackend::new(api);
+        let mut q = query();
+        q.window_id = "10".to_owned();
+        q.window_pid = 200;
+        q.process_start_time = 1000; // Old notification had start_time 1000
+        q.window_instance_id = "win32:10:200:1:1000".to_owned();
+
+        assert!(backend.resolve_target(&q).unwrap().is_none());
+
+        let target = WindowTarget {
+            id: "10".to_owned(),
+            instance_id: "win32:10:200:1:1000".to_owned(),
+            pid: 200,
+            process_start_time: 1000,
+            title: "project - Codex".to_owned(),
+            app_id: "CASCADIA_HOSTING_WINDOW_CLASS".to_owned(),
+            generation: 1,
+        };
+        assert_eq!(backend.focus(&target, &q).unwrap(), FocusOutcome::NotFound);
+    }
+
+    #[test]
+    fn windows_dual_window_distinct_sessions_route_correctly() {
+        let api = FakeApi {
+            windows: vec![
+                window(10, 200, "project-a - Codex"),
+                window(11, 200, "project-b - Codex"),
+            ],
+            foreground: Mutex::new(None),
+            activation_succeeds: true,
+            start_times: Mutex::new(HashMap::new()),
+        };
+        let backend = WindowsBackend::new(api);
+
+        let mut q_a = query();
+        q_a.window_id = "10".to_owned();
+        q_a.window_instance_id = "win32:10:200:1:1000".to_owned();
+        q_a.project_hint = "project-a".to_owned();
+
+        let mut q_b = query();
+        q_b.window_id = "11".to_owned();
+        q_b.window_instance_id = "win32:11:200:1:1000".to_owned();
+        q_b.project_hint = "project-b".to_owned();
+
+        let target_a = backend.resolve_target(&q_a).unwrap().unwrap();
+        assert_eq!(target_a.id, "10");
+        assert_eq!(target_a.instance_id, "win32:10:200:1:1000");
+
+        let target_b = backend.resolve_target(&q_b).unwrap().unwrap();
+        assert_eq!(target_b.id, "11");
+        assert_eq!(target_b.instance_id, "win32:11:200:1:1000");
     }
 }

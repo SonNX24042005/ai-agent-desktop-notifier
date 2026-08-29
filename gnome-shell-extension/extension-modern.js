@@ -83,6 +83,10 @@ const INTERFACE_XML = `
       <arg type="s" name="title" direction="out"/>
       <arg type="s" name="appId" direction="out"/>
     </method>
+    <method name="KeepOverlayAboveV6">
+      <arg type="u" name="overlayPid" direction="in"/>
+      <arg type="b" name="promoted" direction="out"/>
+    </method>
   </interface>
 </node>`;
 
@@ -94,6 +98,8 @@ const DEVELOPER_CLASSES = [
     'phpstorm', 'rider', 'rubymine', 'datagrip', 'fleet', 'sublime_text',
     'gedit', 'kate', 'emacs', 'neovim', 'gvim',
 ];
+
+const OVERLAY_WINDOW_TITLE = 'AI agent notifier';
 
 function normalize(value) {
     return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -234,6 +240,23 @@ function windowToken(window) {
     return `wayland:${window.get_stable_sequence()}`;
 }
 
+function keepOverlayAbove(overlayPid) {
+    const pid = Number(overlayPid) || 0;
+    if (pid <= 1)
+        return false;
+    const windows = global.get_window_actors()
+        .map(actor => actor.get_meta_window())
+        .filter(window => window.get_pid() === pid)
+        .filter(window => String(window.get_title() ?? '') === OVERLAY_WINDOW_TITLE);
+    if (windows.length === 0)
+        return false;
+    for (const window of windows) {
+        window.make_above();
+        window.stick();
+    }
+    return true;
+}
+
 function captureWindowByTitleMarker(titleMarker) {
     const marker = String(titleMarker ?? '').trim();
     if (!marker.startsWith('anoti-capture-') || marker.length > 100)
@@ -324,7 +347,7 @@ export default class AiAgentNotifierWindowFocus extends Extension {
     }
 
     GetContractVersion() {
-        return 5;
+        return 6;
     }
 
     FocusWindowV3(callerPidChain, projectHint, titleFingerprint, appHint) {
@@ -386,5 +409,9 @@ export default class AiAgentNotifierWindowFocus extends Extension {
 
     CaptureWindowByTitleV5(titleMarker) {
         return captureWindowByTitleMarker(titleMarker);
+    }
+
+    KeepOverlayAboveV6(overlayPid) {
+        return keepOverlayAbove(overlayPid);
     }
 }

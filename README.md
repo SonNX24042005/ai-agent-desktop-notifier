@@ -8,8 +8,11 @@
 - Backend Linux tách X11 và GNOME Wayland; backend Windows dùng Win32.
 - Trên GNOME Wayland, extension chụp token `wayland:<stable-sequence>`, PID và tiêu đề của cửa sổ đang active lúc bắt đầu phiên.
 - Với nhiều cửa sổ GNOME Terminal dùng chung PID, TTY riêng của từng phiên được dùng để chụp đúng native window token, kể cả khi Codex `SessionStart` chạy trễ.
-- Mỗi thông báo đóng băng identity của phiên. Không chọn gần đúng khi nhiều cửa sổ cùng ứng dụng gây kết quả mơ hồ.
+- Mỗi thông báo đóng băng identity của phiên (`window_instance_id` bằng UUID ngẫu nhiên cho từng lifetime). Cửa sổ hợp lệ vẫn focus chính xác kể cả khi tiêu đề terminal thay đổi hoàn toàn; không chọn gần đúng khi nhiều cửa sổ cùng ứng dụng gây kết quả mơ hồ.
+- Khi một phiên được rebind với bằng chứng nguồn thay đổi được chứng minh (caller mới, tiến trình mới), `SessionStart` chụp lại token native, tăng generation và cấp UUID mới để loại bỏ fail-closed các thông báo cũ; cache cũ chỉ được thay khi caller mới đã được xác minh.
+- Nếu agent dùng ID khác nhau giữa sự kiện bắt đầu và hoàn thành, runtime liên kết bằng caller đã capture và chỉ dùng kết quả khi xác định duy nhất một cửa sổ.
 - Nút chuyển cửa sổ chỉ đóng popup sau khi hệ điều hành xác nhận đúng cửa sổ đích đã active; nếu chuyển thất bại, popup hiện lại để thử tiếp.
+- Popup GNOME Wayland được extension giữ trên lớp cửa sổ ứng dụng và trên mọi workspace cho đến khi đóng, focus thành công hoặc hết thời gian chờ.
 - Chỉ một popup được hiển thị tại một thời điểm; các yêu cầu khác chờ trong hàng đợi liên tiến trình.
 - Runtime Python cũ đã được loại khỏi production path. Cài đặt hoặc cập nhật sẽ dọn cả tệp hook Python và các entry Codex/Antigravity cũ còn trỏ tới chúng trong hồ sơ người dùng, đồng thời giữ nguyên hook bên thứ ba.
 
@@ -34,7 +37,7 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.ps1 | iex
 ```
 
-Installer chỉ biên dịch Rust với tối đa hai job mặc định, sau đó dùng `anoti install` để cài binary, extension và merge hook mà vẫn giữ cấu hình bên thứ ba. Trên GNOME Wayland, hãy đăng xuất rồi đăng nhập lại nếu phiên Shell hiện tại chưa nạp version extension mới.
+Installer chỉ biên dịch Rust với tối đa hai job mặc định, sau đó dùng `anoti install` để cài binary, extension và merge hook mà vẫn giữ cấu hình bên thứ ba. Trên GNOME Wayland, hãy đăng xuất rồi đăng nhập lại nếu phiên Shell hiện tại chưa nạp version extension mới; contract v6 trở lên được dùng để giữ popup không bị chìm.
 
 ## Lệnh thường dùng
 

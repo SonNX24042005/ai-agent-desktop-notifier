@@ -12,7 +12,9 @@ use gtk::prelude::*;
 
 use crate::LinuxMonitor;
 
-type Probe = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+pub(crate) type Probe = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+const KEEP_ABOVE_ATTEMPTS: usize = 10;
+const KEEP_ABOVE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn show_overlay(
@@ -20,6 +22,7 @@ pub fn show_overlay(
     monitors: &[LinuxMonitor],
     focus: Probe,
     active: Probe,
+    keep_above: Option<Probe>,
 ) -> Result<OverlayOutcome, PlatformError> {
     gtk::init().map_err(|error| PlatformError::Operation(format!("initialize GTK: {error}")))?;
     let state = Arc::new(Mutex::new(OverlayState::default()));
@@ -33,8 +36,12 @@ pub fn show_overlay(
     let windows = Rc::new(RefCell::new(Vec::<gtk::Window>::new()));
 
     for monitor in placements {
-        let window = gtk::Window::new(gtk::WindowType::Popup);
+        // A parentless GTK popup becomes an xdg_popup on Wayland. Mutter is then free to
+        // lower it behind application windows. A notification toplevel can be promoted by
+        // the GNOME adapter while retaining the X11 keep-above fallback.
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
         window.set_title("AI agent notifier");
+        window.set_type_hint(gtk::gdk::WindowTypeHint::Notification);
         window.set_decorated(false);
         window.set_keep_above(true);
         window.set_skip_taskbar_hint(true);
@@ -172,6 +179,20 @@ pub fn show_overlay(
         windows.borrow_mut().push(window);
     }
 
+    if let Some(promote) = keep_above {
+        glib::timeout_add_local_once(Duration::from_millis(100), move || {
+            let _ = std::thread::Builder::new()
+                .name("anoti-ui-keep-above".to_owned())
+                .spawn(move || {
+                    let _ = keep_overlay_above_with_retry(
+                        &promote,
+                        KEEP_ABOVE_ATTEMPTS,
+                        KEEP_ABOVE_RETRY_DELAY,
+                    );
+                });
+        });
+    }
+
     let (sender, receiver) = mpsc::sync_channel(1);
     let probe_running = Arc::new(AtomicBool::new(false));
     let state_for_timer = Arc::clone(&state);
@@ -239,6 +260,18 @@ fn show_all(windows: &Rc<RefCell<Vec<gtk::Window>>>) {
     }
 }
 
+fn keep_overlay_above_with_retry(promote: &Probe, attempts: usize, delay: Duration) -> bool {
+    for attempt in 0..attempts {
+        if promote() {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(delay);
+        }
+    }
+    false
+}
+
 fn point_in_widget<W: IsA<gtk::Widget>>(widget: &W, window: &gtk::Window, x: f64, y: f64) -> bool {
     let Some((left, top)) = widget.translate_coordinates(window, 0, 0) else {
         return false;
@@ -252,6 +285,31 @@ fn point_in_widget<W: IsA<gtk::Widget>>(widget: &W, window: &gtk::Window, x: f64
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn keep_above_retries_until_the_compositor_sees_the_window() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_probe = Arc::clone(&attempts);
+        let promote: Probe =
+            Arc::new(move || attempts_for_probe.fetch_add(1, Ordering::Relaxed) >= 2);
+
+        assert!(keep_overlay_above_with_retry(&promote, 5, Duration::ZERO));
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn keep_above_retry_is_bounded_when_the_adapter_is_unavailable() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_probe = Arc::clone(&attempts);
+        let promote: Probe = Arc::new(move || {
+            attempts_for_probe.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+
+        assert!(!keep_overlay_above_with_retry(&promote, 4, Duration::ZERO));
+        assert_eq!(attempts.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     #[ignore = "requires a live Linux X display and an external background click"]
@@ -263,7 +321,7 @@ mod tests {
             timeout: 10,
             ..NotificationRequest::default()
         };
-        let outcome = show_overlay(&request, &[], Arc::new(|| false), Arc::new(|| false))
+        let outcome = show_overlay(&request, &[], Arc::new(|| false), Arc::new(|| false), None)
             .expect("GTK overlay should initialize on the test display");
         assert!(outcome.dismissed);
         assert!(!outcome.focused);

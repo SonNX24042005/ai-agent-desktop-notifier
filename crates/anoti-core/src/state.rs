@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::{QueueItem, QueueStatus, SessionRecord, WindowIdentity};
+use crate::{QueueItem, QueueStatus, SessionRecord, WindowIdentity, generate_window_instance_id};
 
 const SESSION_MAX_AGE: f64 = 86_400.0;
 const SESSION_MAX_ENTRIES: usize = 64;
@@ -213,7 +213,97 @@ impl SessionStore {
         Ok(entries.get(session_id).and_then(session_from_value))
     }
 
+    /// Resolves an exact record by session id first, then by verified caller provenance.
+    /// Caller fallback is accepted only when every strongest candidate identifies the same
+    /// native window, so a shared application process can never select an arbitrary window.
+    pub fn resolve_exact(
+        &self,
+        identity: &WindowIdentity,
+    ) -> Result<Option<SessionRecord>, StateError> {
+        let _lock = StateLock::acquire(&self.paths.session_lock, Duration::from_millis(500))?;
+        let now = epoch_seconds();
+        let entries: HashMap<String, Value> = load_json_or_default(&self.paths.sessions);
+        let records = entries
+            .values()
+            .filter_map(session_from_value)
+            .filter(|record| {
+                record.has_exact_window_identity() && now - record.updated_at < SESSION_MAX_AGE
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(record) = entries
+            .get(identity.session_id.trim())
+            .and_then(session_from_value)
+            .filter(SessionRecord::has_exact_window_identity)
+            .filter(|record| caller_is_compatible(identity, record))
+        {
+            if identity.generation > 0 && record.generation > identity.generation {
+                return Ok(None);
+            }
+            if !identity.window_instance_id.is_empty()
+                && !record.window_instance_id.is_empty()
+                && record.window_instance_id != identity.window_instance_id
+            {
+                return Ok(None);
+            }
+            if identity.process_start_time > 0
+                && record.process_start_time > 0
+                && record.process_start_time != identity.process_start_time
+            {
+                return Ok(None);
+            }
+            return Ok(Some(record));
+        }
+
+        let best_strength = records
+            .iter()
+            .map(|record| caller_match_strength(identity, record))
+            .max()
+            .unwrap_or(0);
+        if best_strength == 0 {
+            return Ok(None);
+        }
+        let candidates = records
+            .into_iter()
+            .filter(|record| caller_match_strength(identity, record) == best_strength)
+            .collect::<Vec<_>>();
+        let Some(first) = candidates.first() else {
+            return Ok(None);
+        };
+        if candidates.iter().any(|record| {
+            record.window_id != first.window_id
+                || record.window_pid != first.window_pid
+                || (record.process_start_time > 0
+                    && first.process_start_time > 0
+                    && record.process_start_time != first.process_start_time)
+                || (!record.window_instance_id.is_empty()
+                    && !first.window_instance_id.is_empty()
+                    && record.window_instance_id != first.window_instance_id)
+        }) {
+            return Ok(None);
+        }
+        Ok(candidates
+            .into_iter()
+            .max_by(|left, right| left.updated_at.total_cmp(&right.updated_at)))
+    }
+
     pub fn save(&self, session_id: &str, record: SessionRecord) -> Result<(), StateError> {
+        self.save_with_policy(session_id, record, false)
+    }
+
+    /// Saves an explicit session-start capture. An exact identity may move only when the
+    /// capture comes from a different concrete caller process, which represents a new agent
+    /// runtime rather than a repeated hook from the existing runtime.
+    pub fn save_capture(&self, session_id: &str, record: SessionRecord) -> Result<(), StateError> {
+        self.save_with_policy(session_id, record, true)
+    }
+
+    fn save_with_policy(
+        &self,
+        session_id: &str,
+        mut record: SessionRecord,
+        allow_new_source: bool,
+    ) -> Result<(), StateError> {
         if session_id.trim().is_empty() {
             return Ok(());
         }
@@ -225,9 +315,32 @@ impl SessionStore {
         });
         if let Some(existing) = entries.get(session_id).and_then(session_from_value)
             && existing.has_exact_window_identity()
-            && (!record.has_exact_window_identity() || existing.window_id != record.window_id)
         {
-            return Ok(());
+            if !record.has_exact_window_identity() {
+                return Ok(());
+            }
+            let source_changed = capture_source_changed(&existing, &record);
+            let window_changed = existing.window_id != record.window_id
+                || (existing.process_start_time > 0
+                    && record.process_start_time > 0
+                    && existing.process_start_time != record.process_start_time);
+            if window_changed || source_changed {
+                if !allow_new_source || !source_changed {
+                    return Ok(());
+                }
+                record.generation = existing.generation + 1;
+                record.window_instance_id = generate_window_instance_id();
+            } else {
+                record.generation = existing.generation.max(1);
+                record.window_instance_id = existing.window_instance_id;
+            }
+        } else {
+            if record.generation == 0 {
+                record.generation = 1;
+            }
+            if record.window_instance_id.is_empty() && !record.window_id.is_empty() {
+                record.window_instance_id = generate_window_instance_id();
+            }
         }
         entries.insert(session_id.to_owned(), serde_json::to_value(record)?);
         if entries.len() > SESSION_MAX_ENTRIES {
@@ -247,6 +360,55 @@ impl SessionStore {
         }
         atomic_write_json(&self.paths.sessions, &entries)
     }
+}
+
+fn capture_source_changed(existing: &SessionRecord, incoming: &SessionRecord) -> bool {
+    if existing.caller_pid > 1
+        && incoming.caller_pid > 1
+        && existing.caller_pid != incoming.caller_pid
+    {
+        return true;
+    }
+    if existing.process_start_time > 0
+        && incoming.process_start_time > 0
+        && existing.process_start_time != incoming.process_start_time
+    {
+        return true;
+    }
+    if !existing.terminal_screen.is_empty()
+        && !incoming.terminal_screen.is_empty()
+        && existing.terminal_screen != incoming.terminal_screen
+    {
+        return true;
+    }
+    if !existing.caller_tty.is_empty()
+        && !incoming.caller_tty.is_empty()
+        && existing.caller_tty != incoming.caller_tty
+    {
+        return true;
+    }
+    false
+}
+
+fn caller_is_compatible(identity: &WindowIdentity, record: &SessionRecord) -> bool {
+    identity.caller_pid <= 1
+        || record.caller_pid <= 1
+        || caller_match_strength(identity, record) > 0
+}
+
+fn caller_match_strength(identity: &WindowIdentity, record: &SessionRecord) -> u8 {
+    if identity.caller_pid <= 1 || record.caller_pid <= 1 {
+        return 0;
+    }
+    if identity.caller_pid == record.caller_pid {
+        return 3;
+    }
+    if identity.caller_pid_chain.contains(&record.caller_pid)
+        || record.caller_pid_chain.contains(&identity.caller_pid)
+    {
+        return 2;
+    }
+    0
 }
 
 fn session_from_value(value: &Value) -> Option<SessionRecord> {
@@ -491,6 +653,141 @@ mod tests {
     }
 
     #[test]
+    fn explicit_capture_rebinds_exact_identity_for_a_new_agent_process() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        store
+            .save_capture(
+                "session",
+                SessionRecord {
+                    window_id: "wayland:41".into(),
+                    window_pid: 410,
+                    caller_pid: 411,
+                    title_fingerprint: "first terminal".into(),
+                    precision: "window".into(),
+                    updated_at: epoch_seconds(),
+                    ..SessionRecord::default()
+                },
+            )
+            .unwrap();
+        store
+            .save_capture(
+                "session",
+                SessionRecord {
+                    window_id: "wayland:42".into(),
+                    window_pid: 420,
+                    caller_pid: 421,
+                    title_fingerprint: "second terminal".into(),
+                    precision: "window".into(),
+                    updated_at: epoch_seconds(),
+                    ..SessionRecord::default()
+                },
+            )
+            .unwrap();
+
+        let record = store.get("session").unwrap().unwrap();
+        assert_eq!(record.window_id, "wayland:42");
+        assert_eq!(record.caller_pid, 421);
+    }
+
+    #[test]
+    fn repeated_capture_cannot_rebind_the_same_agent_process() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        for window_id in ["wayland:41", "wayland:42"] {
+            store
+                .save_capture(
+                    "session",
+                    SessionRecord {
+                        window_id: window_id.into(),
+                        window_pid: 410,
+                        caller_pid: 411,
+                        title_fingerprint: "terminal".into(),
+                        precision: "window".into(),
+                        updated_at: epoch_seconds(),
+                        ..SessionRecord::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            store.get("session").unwrap().unwrap().window_id,
+            "wayland:41"
+        );
+    }
+
+    #[test]
+    fn exact_identity_resolves_by_caller_when_agent_event_ids_differ() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        store
+            .save_capture(
+                "session-start-id",
+                SessionRecord {
+                    window_id: "wayland:51".into(),
+                    window_pid: 510,
+                    caller_pid: 511,
+                    caller_pid_chain: vec![511, 500],
+                    title_fingerprint: "second agent window".into(),
+                    precision: "window".into(),
+                    updated_at: epoch_seconds(),
+                    ..SessionRecord::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "completion-event-id".into(),
+                caller_pid: 511,
+                caller_pid_chain: vec![511, 500],
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.window_id, "wayland:51");
+    }
+
+    #[test]
+    fn caller_fallback_rejects_multiple_native_windows_at_the_same_strength() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        for (session_id, window_id) in [
+            ("first-session", "wayland:51"),
+            ("second-session", "wayland:52"),
+        ] {
+            store
+                .save_capture(
+                    session_id,
+                    SessionRecord {
+                        window_id: window_id.into(),
+                        window_pid: 510,
+                        caller_pid: 511,
+                        caller_pid_chain: vec![511, 500],
+                        title_fingerprint: "shared application".into(),
+                        precision: "window".into(),
+                        updated_at: epoch_seconds(),
+                        ..SessionRecord::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .resolve_exact(&WindowIdentity {
+                    session_id: "completion-event-id".into(),
+                    caller_pid: 511,
+                    caller_pid_chain: vec![511, 500],
+                    ..WindowIdentity::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn displaying_item_requeues_previous_and_oldest_is_stable() {
         let (_directory, paths) = paths();
         let store = QueueStore::new(paths);
@@ -647,5 +944,290 @@ mod tests {
             ..WindowIdentity::default()
         };
         assert_eq!(queue_key(&identity), "sess_abc");
+    }
+
+    #[test]
+    fn generation_increments_when_session_rebinds_to_new_window() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        let record1 = SessionRecord {
+            window_id: "x11:100".to_owned(),
+            window_instance_id: "x11:100:200".to_owned(),
+            window_pid: 200,
+            caller_pid: 50,
+            title_fingerprint: "agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-1", record1).unwrap();
+
+        let resolved = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-1".to_owned(),
+                caller_pid: 50,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.generation, 1);
+        assert_eq!(resolved.window_id, "x11:100");
+
+        // Now session rebinds to a new window from a new caller process
+        let record2 = SessionRecord {
+            window_id: "x11:200".to_owned(),
+            window_instance_id: "x11:200:200".to_owned(),
+            window_pid: 200,
+            caller_pid: 51,
+            title_fingerprint: "agent terminal 2".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-1", record2).unwrap();
+
+        let resolved2 = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-1".to_owned(),
+                caller_pid: 51,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved2.generation, 2);
+        assert_eq!(resolved2.window_id, "x11:200");
+
+        // Stale notification with older generation 1 is rejected
+        let stale_query = WindowIdentity {
+            session_id: "session-1".to_owned(),
+            caller_pid: 51,
+            generation: 1,
+            ..WindowIdentity::default()
+        };
+        assert!(store.resolve_exact(&stale_query).unwrap().is_none());
+
+        // Current generation 2 is accepted
+        let current_query = WindowIdentity {
+            session_id: "session-1".to_owned(),
+            caller_pid: 51,
+            generation: 2,
+            ..WindowIdentity::default()
+        };
+        assert!(store.resolve_exact(&current_query).unwrap().is_some());
+    }
+
+    #[test]
+    fn two_agent_windows_have_distinct_session_records_and_resolve_correctly() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        let record_a = SessionRecord {
+            window_id: "x11:101".to_owned(),
+            window_instance_id: "x11:101:300:1:0".to_owned(),
+            window_pid: 300,
+            caller_pid: 301,
+            title_fingerprint: "agent window A".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        let record_b = SessionRecord {
+            window_id: "x11:102".to_owned(),
+            window_instance_id: "x11:102:300:1:0".to_owned(),
+            window_pid: 300,
+            caller_pid: 302,
+            title_fingerprint: "agent window B".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-a", record_a).unwrap();
+        store.save_capture("session-b", record_b).unwrap();
+
+        let resolved_a = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-a".to_owned(),
+                caller_pid: 301,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_a.window_id, "x11:101");
+        assert_eq!(resolved_a.window_instance_id, "x11:101:300:1:0");
+
+        let resolved_b = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-b".to_owned(),
+                caller_pid: 302,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved_b.window_id, "x11:102");
+        assert_eq!(resolved_b.window_instance_id, "x11:102:300:1:0");
+    }
+
+    #[test]
+    fn session_rebind_on_process_restart_with_new_start_time_increments_generation() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        let record1 = SessionRecord {
+            window_id: "x11:100".to_owned(),
+            window_instance_id: "x11:100:200:1:5000".to_owned(),
+            window_pid: 200,
+            process_start_time: 5000,
+            caller_pid: 50,
+            title_fingerprint: "agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-restart", record1).unwrap();
+
+        let resolved = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-restart".to_owned(),
+                caller_pid: 50,
+                process_start_time: 5000,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.generation, 1);
+
+        // Process restarted with same PID 200 and same window 100, but new process start time 9000
+        let record2 = SessionRecord {
+            window_id: "x11:100".to_owned(),
+            window_instance_id: "x11:100:200:1:9000".to_owned(),
+            window_pid: 200,
+            process_start_time: 9000,
+            caller_pid: 50,
+            title_fingerprint: "agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-restart", record2).unwrap();
+
+        let resolved2 = store
+            .resolve_exact(&WindowIdentity {
+                session_id: "session-restart".to_owned(),
+                caller_pid: 50,
+                process_start_time: 9000,
+                ..WindowIdentity::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved2.generation, 2);
+        assert_eq!(resolved2.process_start_time, 9000);
+
+        // Stale query with old start_time 5000 is rejected
+        let stale_query = WindowIdentity {
+            session_id: "session-restart".to_owned(),
+            caller_pid: 50,
+            process_start_time: 5000,
+            generation: 1,
+            ..WindowIdentity::default()
+        };
+        assert!(store.resolve_exact(&stale_query).unwrap().is_none());
+    }
+
+    #[test]
+    fn repeated_capture_same_lifetime_preserves_uuid_and_generation() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        let record = SessionRecord {
+            window_id: "x11:100".to_owned(),
+            window_pid: 200,
+            caller_pid: 50,
+            process_start_time: 1000,
+            title_fingerprint: "agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store
+            .save_capture("session-repeat", record.clone())
+            .unwrap();
+
+        let first = store.get("session-repeat").unwrap().unwrap();
+        let initial_uuid = first.window_instance_id.clone();
+        assert!(!initial_uuid.is_empty());
+        assert_eq!(first.generation, 1);
+
+        // Repeated capture from the same caller and same window
+        store.save_capture("session-repeat", record).unwrap();
+        let second = store.get("session-repeat").unwrap().unwrap();
+        assert_eq!(second.window_instance_id, initial_uuid);
+        assert_eq!(second.generation, 1);
+    }
+
+    #[test]
+    fn rebind_or_restart_generates_new_uuid_and_makes_old_notification_fail_closed() {
+        let (_directory, paths) = paths();
+        let store = SessionStore::new(paths);
+        let record1 = SessionRecord {
+            window_id: "x11:100".to_owned(),
+            window_pid: 200,
+            caller_pid: 50,
+            process_start_time: 1000,
+            title_fingerprint: "agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-rebind-uuid", record1).unwrap();
+
+        let first = store.get("session-rebind-uuid").unwrap().unwrap();
+        let uuid_v1 = first.window_instance_id.clone();
+        assert_eq!(first.generation, 1);
+
+        // Rebind to a new caller process (proven rebind)
+        let record2 = SessionRecord {
+            window_id: "x11:200".to_owned(),
+            window_pid: 300,
+            caller_pid: 51,
+            process_start_time: 2000,
+            title_fingerprint: "new agent terminal".to_owned(),
+            precision: "window".to_owned(),
+            backend: "x11".to_owned(),
+            updated_at: epoch_seconds(),
+            ..SessionRecord::default()
+        };
+        store.save_capture("session-rebind-uuid", record2).unwrap();
+
+        let second = store.get("session-rebind-uuid").unwrap().unwrap();
+        let uuid_v2 = second.window_instance_id.clone();
+        assert_eq!(second.generation, 2);
+        assert_ne!(uuid_v1, uuid_v2);
+
+        // Stale notification with uuid_v1 and generation 1 fails closed
+        let stale_query = WindowIdentity {
+            session_id: "session-rebind-uuid".to_owned(),
+            window_instance_id: uuid_v1,
+            caller_pid: 51,
+            generation: 1,
+            ..WindowIdentity::default()
+        };
+        assert!(store.resolve_exact(&stale_query).unwrap().is_none());
+
+        // Current notification with uuid_v2 and generation 2 succeeds
+        let current_query = WindowIdentity {
+            session_id: "session-rebind-uuid".to_owned(),
+            window_instance_id: uuid_v2.clone(),
+            caller_pid: 51,
+            generation: 2,
+            ..WindowIdentity::default()
+        };
+        let resolved = store.resolve_exact(&current_query).unwrap().unwrap();
+        assert_eq!(resolved.window_instance_id, uuid_v2);
+        assert_eq!(resolved.generation, 2);
     }
 }

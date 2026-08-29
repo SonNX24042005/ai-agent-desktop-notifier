@@ -481,11 +481,9 @@ fn dispatch_webhooks(request: &NotificationRequest) -> Result<(), Box<dyn Error>
 }
 
 fn hydrate_session_identity(request: &mut NotificationRequest) -> Result<(), Box<dyn Error>> {
-    let session_id = request.identity.session_id.trim();
-    if session_id.is_empty() {
-        return Ok(());
-    }
-    let Some(record) = SessionStore::new(RuntimePaths::discover()?).get(session_id)? else {
+    let Some(record) =
+        SessionStore::new(RuntimePaths::discover()?).resolve_exact(&request.identity)?
+    else {
         return Ok(());
     };
     apply_session_identity(request, record);
@@ -499,13 +497,16 @@ fn apply_session_identity(request: &mut NotificationRequest, record: SessionReco
     let session_id = request.identity.session_id.clone();
     request.identity = WindowIdentity {
         window_id: record.window_id,
+        window_instance_id: record.window_instance_id,
         window_pid: record.window_pid,
+        process_start_time: record.process_start_time,
         caller_pid: record.caller_pid,
         caller_pid_chain: record.caller_pid_chain,
         project_hint: record.project_hint,
         title_fingerprint: record.title_fingerprint,
         app_hint: record.app_hint,
         session_id,
+        generation: record.generation,
     };
 }
 
@@ -565,7 +566,9 @@ fn queue_notification(request: &NotificationRequest) -> Result<Option<String>, B
             event_kind: request.event_kind,
             sound: request.sound.clone(),
             target_window_id: request.identity.window_id.clone(),
+            window_instance_id: request.identity.window_instance_id.clone(),
             window_pid: request.identity.window_pid,
+            process_start_time: request.identity.process_start_time,
             caller_pid: request.identity.caller_pid,
             caller_pid_chain: request.identity.caller_pid_chain.clone(),
             project_hint: request.identity.project_hint.clone(),
@@ -575,28 +578,30 @@ fn queue_notification(request: &NotificationRequest) -> Result<Option<String>, B
             timeout: request.timeout,
             auto_dismiss_delay: request.auto_dismiss_delay,
             status: QueueStatus::Queued,
+            generation: request.identity.generation,
             created_at: epoch_seconds(),
-            ..QueueItem::default()
         },
     )?;
     Ok(Some(key))
 }
 
 fn deliver_notification(key: &str, request: &NotificationRequest) -> Result<(), Box<dyn Error>> {
+    let mut request = request.clone();
+    hydrate_session_identity(&mut request)?;
     let paths = RuntimePaths::discover()?;
     let store = QueueStore::new(paths.clone());
-    let mut displaying = queue_item_from_request(request);
+    let mut displaying = queue_item_from_request(&request);
     displaying.status = QueueStatus::Displaying;
     store.save(key, displaying)?;
     let backend = platform_backend();
     let _ = backend.play_sound(&request.sound);
-    match backend.show_overlay(request) {
+    match backend.show_overlay(&request) {
         Ok(outcome) if outcome.dismissed || outcome.focused => {
             store.remove(key)?;
         }
         Ok(_) => store.requeue_displaying(None)?,
         Err(_) => {
-            let _ = backend.native_notify(request);
+            let _ = backend.native_notify(&request);
             store.requeue_displaying(None)?;
         }
     }
@@ -613,7 +618,9 @@ fn queue_item_from_request(request: &NotificationRequest) -> QueueItem {
         event_kind: request.event_kind,
         sound: request.sound.clone(),
         target_window_id: request.identity.window_id.clone(),
+        window_instance_id: request.identity.window_instance_id.clone(),
         window_pid: request.identity.window_pid,
+        process_start_time: request.identity.process_start_time,
         caller_pid: request.identity.caller_pid,
         caller_pid_chain: request.identity.caller_pid_chain.clone(),
         project_hint: request.identity.project_hint.clone(),
@@ -623,8 +630,8 @@ fn queue_item_from_request(request: &NotificationRequest) -> QueueItem {
         timeout: request.timeout,
         auto_dismiss_delay: request.auto_dismiss_delay,
         status: QueueStatus::Queued,
+        generation: request.identity.generation,
         created_at: epoch_seconds(),
-        ..QueueItem::default()
     }
 }
 
@@ -639,13 +646,16 @@ fn request_from_queue_item(item: &QueueItem) -> NotificationRequest {
         sound: item.sound.clone(),
         identity: WindowIdentity {
             window_id: item.target_window_id.clone(),
+            window_instance_id: item.window_instance_id.clone(),
             window_pid: item.window_pid,
+            process_start_time: item.process_start_time,
             caller_pid: item.caller_pid,
             caller_pid_chain: item.caller_pid_chain.clone(),
             project_hint: item.project_hint.clone(),
             app_hint: item.app_hint.clone(),
             title_fingerprint: item.title_fingerprint.clone(),
             session_id: item.session_id.clone(),
+            generation: item.generation,
         },
         timeout: item.timeout,
         auto_dismiss_delay: item.auto_dismiss_delay,
@@ -673,18 +683,12 @@ fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn Error>> {
     }
     let paths = RuntimePaths::discover()?;
     let sessions = SessionStore::new(paths.clone());
-    if sessions
-        .get(&args.session_id)?
-        .is_some_and(|record| record.has_exact_window_identity())
-    {
-        return Ok(());
-    }
     let backend = platform_backend();
     let backend_name = backend.capabilities().backend;
     let record = capture_session_record(args, &backend_name, |query| {
         backend.capture_identity(query).ok().flatten()
     });
-    sessions.save(&args.session_id, record)?;
+    sessions.save_capture(&args.session_id, record)?;
     Ok(())
 }
 
@@ -721,9 +725,11 @@ where
         let record = SessionRecord {
             window_id_dec: identity.window_id.clone(),
             window_id: identity.window_id,
+            window_instance_id: identity.window_instance_id,
             project_hint: identity.project_hint,
             pid: identity.caller_pid,
             window_pid: identity.window_pid,
+            process_start_time: identity.process_start_time,
             caller_pid: identity.caller_pid,
             caller_pid_chain: identity.caller_pid_chain,
             app_hint: identity.app_hint,
@@ -732,6 +738,7 @@ where
             backend: backend_name.to_owned(),
             caller_tty: args.caller_tty.clone().unwrap_or_default(),
             terminal_screen: args.terminal_screen.clone().unwrap_or_default(),
+            generation: identity.generation,
             updated_at: epoch_seconds(),
             ..SessionRecord::default()
         };
@@ -774,7 +781,8 @@ fn run_focus() -> Result<(), Box<dyn Error>> {
     let store = QueueStore::new(paths);
     let pending = store.oldest_actionable()?;
     if let Some((key, item)) = pending {
-        let request = request_from_queue_item(&item);
+        let mut request = request_from_queue_item(&item);
+        hydrate_session_identity(&mut request)?;
         let query = identity_query(&request.identity);
         let backend = platform_backend();
         let outcome = match backend.resolve_target(&query)? {
@@ -797,13 +805,16 @@ fn run_focus() -> Result<(), Box<dyn Error>> {
 fn identity_query(identity: &WindowIdentity) -> IdentityQuery {
     IdentityQuery {
         window_id: identity.window_id.clone(),
+        window_instance_id: identity.window_instance_id.clone(),
         window_pid: identity.window_pid,
+        process_start_time: identity.process_start_time,
         caller_pid: identity.caller_pid,
         caller_pid_chain: identity.caller_pid_chain.clone(),
         project_hint: identity.project_hint.clone(),
         session_id: identity.session_id.clone(),
         app_hint: identity.app_hint.clone(),
         title_fingerprint: identity.title_fingerprint.clone(),
+        generation: identity.generation,
         ..IdentityQuery::default()
     }
 }
@@ -1042,6 +1053,7 @@ mod tests {
             assert_eq!(query.caller_pid_chain, [41, 12]);
             Some(WindowIdentity {
                 window_id: "wayland:3".to_owned(),
+                window_instance_id: "wayland:wayland:3:99".to_owned(),
                 window_pid: 99,
                 caller_pid: query.caller_pid,
                 caller_pid_chain: query.caller_pid_chain.clone(),
@@ -1049,6 +1061,8 @@ mod tests {
                 title_fingerprint: "project - Visual Studio Code".to_owned(),
                 app_hint: query.app_hint.clone(),
                 session_id: query.session_id.clone(),
+                generation: 0,
+                process_start_time: 0,
             })
         });
         assert_eq!(record.window_id, "wayland:3");
@@ -1065,7 +1079,7 @@ mod tests {
         let mut request = NotificationRequest {
             identity: WindowIdentity {
                 session_id: "session".to_owned(),
-                caller_pid: 12,
+                caller_pid: 71,
                 ..WindowIdentity::default()
             },
             ..NotificationRequest::default()

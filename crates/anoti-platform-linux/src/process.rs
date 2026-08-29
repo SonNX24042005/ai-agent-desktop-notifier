@@ -11,6 +11,7 @@ pub struct ProcStat {
     pub session: i32,
     pub tty_number: i32,
     pub foreground_group: i32,
+    pub start_time: u64,
 }
 
 pub fn parse_proc_stat(input: &str) -> Option<ProcStat> {
@@ -31,7 +32,21 @@ pub fn parse_proc_stat(input: &str) -> Option<ProcStat> {
         session: fields.get(3)?.parse().ok()?,
         tty_number: fields.get(4)?.parse().ok()?,
         foreground_group: fields.get(5)?.parse().ok()?,
+        start_time: fields
+            .get(19)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
     })
+}
+
+pub fn process_start_time(pid: u32) -> u64 {
+    if pid <= 1 {
+        return 0;
+    }
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_proc_stat(&stat))
+        .map_or(0, |stat| stat.start_time)
 }
 
 pub fn process_ancestry(start_pid: u32) -> Vec<u32> {
@@ -54,13 +69,17 @@ mod tests {
 
     #[test]
     fn proc_stat_parser_handles_spaces_and_closing_parenthesis() {
-        let stat = parse_proc_stat("123 (agent ) worker) S 42 10 10 34817 10 0 0").unwrap();
+        let stat = parse_proc_stat(
+            "123 (agent ) worker) S 42 10 10 34817 10 0 0 0 0 0 0 0 0 0 0 0 0 0 123456",
+        )
+        .unwrap();
         assert_eq!(stat.pid, 123);
         assert_eq!(stat.command, "agent ) worker");
         assert_eq!(stat.parent_pid, 42);
         assert_eq!(stat.process_group, 10);
         assert_eq!(stat.tty_number, 34817);
         assert_eq!(stat.foreground_group, 10);
+        assert_eq!(stat.start_time, 123_456);
     }
 
     #[test]

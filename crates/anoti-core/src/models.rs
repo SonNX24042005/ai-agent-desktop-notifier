@@ -35,7 +35,11 @@ pub struct WindowIdentity {
     #[serde(default)]
     pub window_id: String,
     #[serde(default)]
+    pub window_instance_id: String,
+    #[serde(default)]
     pub window_pid: u32,
+    #[serde(default)]
+    pub process_start_time: u64,
     #[serde(default)]
     pub caller_pid: u32,
     #[serde(default)]
@@ -48,6 +52,8 @@ pub struct WindowIdentity {
     pub app_hint: String,
     #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// Session cache record compatible with the legacy schema v4 writer.
@@ -60,11 +66,15 @@ pub struct SessionRecord {
     #[serde(default)]
     pub window_id_dec: String,
     #[serde(default)]
+    pub window_instance_id: String,
+    #[serde(default)]
     pub project_hint: String,
     #[serde(default)]
     pub pid: u32,
     #[serde(default)]
     pub window_pid: u32,
+    #[serde(default)]
+    pub process_start_time: u64,
     #[serde(default)]
     pub caller_pid: u32,
     #[serde(default)]
@@ -82,6 +92,8 @@ pub struct SessionRecord {
     #[serde(default)]
     pub terminal_screen: String,
     #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
     pub updated_at: f64,
 }
 
@@ -91,9 +103,11 @@ impl Default for SessionRecord {
             schema_version: default_schema_version(),
             window_id: String::new(),
             window_id_dec: String::new(),
+            window_instance_id: String::new(),
             project_hint: String::new(),
             pid: 0,
             window_pid: 0,
+            process_start_time: 0,
             caller_pid: 0,
             caller_pid_chain: Vec::new(),
             app_hint: String::new(),
@@ -102,6 +116,7 @@ impl Default for SessionRecord {
             backend: String::new(),
             caller_tty: String::new(),
             terminal_screen: String::new(),
+            generation: 0,
             updated_at: 0.0,
         }
     }
@@ -157,7 +172,11 @@ pub struct QueueItem {
     #[serde(default)]
     pub target_window_id: String,
     #[serde(default)]
+    pub window_instance_id: String,
+    #[serde(default)]
     pub window_pid: u32,
+    #[serde(default)]
+    pub process_start_time: u64,
     #[serde(default)]
     pub caller_pid: u32,
     #[serde(default)]
@@ -193,7 +212,9 @@ impl Default for QueueItem {
             event_kind: EventKind::Info,
             sound: String::new(),
             target_window_id: String::new(),
+            window_instance_id: String::new(),
             window_pid: 0,
+            process_start_time: 0,
             caller_pid: 0,
             caller_pid_chain: Vec::new(),
             project_hint: String::new(),

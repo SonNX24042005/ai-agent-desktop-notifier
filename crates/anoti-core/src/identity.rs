@@ -8,6 +8,7 @@ use crate::{FocusOutcome, WindowIdentity};
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CandidateEvidence {
+    pub exact_instance_match: bool,
     pub session_match: bool,
     pub pid_match: bool,
     pub project_match: bool,
@@ -22,10 +23,18 @@ pub struct CandidateEvidence {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowCandidate {
     pub id: String,
+    pub instance_id: String,
     pub pid: u32,
     pub title: String,
     pub app_id: String,
+    pub generation: u64,
     pub evidence: CandidateEvidence,
+}
+
+/// Generates a random non-reusable unique instance identifier for a concrete window lifetime.
+#[must_use]
+pub fn generate_window_instance_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Removes spinner/icon prefixes and normalizes case and whitespace.
@@ -72,6 +81,9 @@ fn score(candidate: &WindowCandidate) -> Option<u8> {
     let evidence = &candidate.evidence;
     if evidence.stale || !evidence.developer_window {
         return None;
+    }
+    if evidence.exact_instance_match {
+        return Some(7);
     }
     if evidence.session_match {
         return Some(6);
@@ -131,6 +143,7 @@ mod tests {
     fn candidate(id: &str, evidence: CandidateEvidence) -> WindowCandidate {
         WindowCandidate {
             id: id.to_owned(),
+            instance_id: format!("test:{id}:100"),
             evidence,
             ..WindowCandidate::default()
         }
@@ -213,5 +226,46 @@ mod tests {
         let chain = normalize_pid_chain(2..100, 99);
         assert_eq!(chain.len(), 32);
         assert_eq!(chain[0], 99);
+    }
+
+    #[test]
+    fn exact_instance_match_overrides_pid_and_title_ambiguity() {
+        let ambiguous1 = candidate(
+            "1",
+            CandidateEvidence {
+                pid_match: true,
+                title_match: true,
+                developer_window: true,
+                ..CandidateEvidence::default()
+            },
+        );
+        let mut ambiguous2 = candidate(
+            "2",
+            CandidateEvidence {
+                exact_instance_match: true,
+                pid_match: true,
+                title_match: true,
+                developer_window: true,
+                ..CandidateEvidence::default()
+            },
+        );
+        ambiguous2.instance_id = "test:2:100".to_owned();
+
+        // Exact instance match has score 7, beating general pid+title match (score 5)
+        let candidates = [ambiguous1, ambiguous2];
+        let resolved = resolve_candidate(&candidates).unwrap().unwrap();
+        assert_eq!(resolved.id, "2");
+        assert_eq!(resolved.instance_id, "test:2:100");
+    }
+
+    #[test]
+    fn generate_window_instance_id_produces_unique_uuids() {
+        let instance1 = generate_window_instance_id();
+        let instance2 = generate_window_instance_id();
+        assert_ne!(instance1, instance2);
+        assert_eq!(instance1.len(), 36);
+        assert_eq!(instance2.len(), 36);
+        assert!(uuid::Uuid::parse_str(&instance1).is_ok());
+        assert!(uuid::Uuid::parse_str(&instance2).is_ok());
     }
 }

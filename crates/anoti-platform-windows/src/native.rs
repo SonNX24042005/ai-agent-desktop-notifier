@@ -186,6 +186,40 @@ pub fn process_ancestry(start_pid: u32) -> Result<Vec<u32>, PlatformError> {
     Ok(chain)
 }
 
+pub fn process_start_time(pid: u32) -> Result<u64, PlatformError> {
+    if pid <= 1 {
+        return Ok(0);
+    }
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: OpenProcess handles are closed via CloseHandle.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(|error| operation("OpenProcess", error))?;
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let success = unsafe {
+        GetProcessTimes(
+            handle,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    if !success.as_bool() {
+        return Err(operation(
+            "GetProcessTimes",
+            "failed to query creation time",
+        ));
+    }
+    Ok(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
+}
+
 struct ThreadAttachment {
     from: u32,
     to: u32,

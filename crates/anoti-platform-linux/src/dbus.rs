@@ -171,6 +171,21 @@ pub fn is_active(query: &IdentityQuery) -> AdapterCall<bool> {
     )
 }
 
+pub fn keep_overlay_above(overlay_pid: u32) -> AdapterCall<bool> {
+    map_adapter_result(call_with_timeout("keep-overlay-above", move || {
+        let (_connection, proxy) = proxy()?;
+        let version = proxy
+            .call::<_, _, u32>("GetContractVersion", &())
+            .unwrap_or(1);
+        if version < 6 {
+            return Err("keeping overlays above requires GNOME extension contract v6".to_owned());
+        }
+        proxy
+            .call("KeepOverlayAboveV6", &(overlay_pid,))
+            .map_err(|error| error.to_string())
+    }))
+}
+
 fn call_bool(
     operation: &'static str,
     v4_method: &'static str,
