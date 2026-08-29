@@ -30,6 +30,59 @@ const INTERFACE_XML = `
       <arg type="s" name="appHint" direction="in"/>
       <arg type="b" name="active" direction="out"/>
     </method>
+    <method name="GetContractVersion">
+      <arg type="u" name="version" direction="out"/>
+    </method>
+    <method name="FocusWindowV3">
+      <arg type="au" name="callerPidChain" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="focused" direction="out"/>
+    </method>
+    <method name="IsWindowActiveV3">
+      <arg type="au" name="callerPidChain" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="active" direction="out"/>
+    </method>
+    <method name="FocusWindowV4">
+      <arg type="s" name="windowToken" direction="in"/>
+      <arg type="u" name="windowPid" direction="in"/>
+      <arg type="au" name="callerPidChain" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="focused" direction="out"/>
+    </method>
+    <method name="IsWindowActiveV4">
+      <arg type="s" name="windowToken" direction="in"/>
+      <arg type="u" name="windowPid" direction="in"/>
+      <arg type="au" name="callerPidChain" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="titleFingerprint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="active" direction="out"/>
+    </method>
+    <method name="CaptureActiveWindowV3">
+      <arg type="au" name="callerPidChain" direction="in"/>
+      <arg type="s" name="projectHint" direction="in"/>
+      <arg type="s" name="appHint" direction="in"/>
+      <arg type="b" name="captured" direction="out"/>
+      <arg type="s" name="windowToken" direction="out"/>
+      <arg type="u" name="windowPid" direction="out"/>
+      <arg type="s" name="title" direction="out"/>
+      <arg type="s" name="appId" direction="out"/>
+    </method>
+    <method name="CaptureWindowByTitleV5">
+      <arg type="s" name="titleMarker" direction="in"/>
+      <arg type="b" name="captured" direction="out"/>
+      <arg type="s" name="windowToken" direction="out"/>
+      <arg type="u" name="windowPid" direction="out"/>
+      <arg type="s" name="title" direction="out"/>
+      <arg type="s" name="appId" direction="out"/>
+    </method>
   </interface>
 </node>`;
 
@@ -44,6 +97,10 @@ const DEVELOPER_CLASSES = [
 
 function normalize(value) {
     return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function canonicalAppIdentity(value) {
+    return normalize(value).replace(/[^a-z0-9]+/g, '-');
 }
 
 function titlesCompatible(expected, current) {
@@ -82,9 +139,12 @@ function isPidInAncestry(targetPid, startPid) {
 }
 
 function isDeveloperWindow(window) {
-    const wmClass = normalize(window.get_wm_class?.());
-    const appId = normalize(window.get_gtk_application_id?.());
-    return DEVELOPER_CLASSES.some(item => wmClass.includes(item) || appId.includes(item));
+    const wmClass = canonicalAppIdentity(window.get_wm_class?.());
+    const appId = canonicalAppIdentity(window.get_gtk_application_id?.());
+    return DEVELOPER_CLASSES.some(item => {
+        const candidate = canonicalAppIdentity(item);
+        return wmClass.includes(candidate) || appId.includes(candidate);
+    });
 }
 
 function isSupportedWindow(window) {
@@ -97,11 +157,11 @@ function isSupportedWindow(window) {
 }
 
 function appIdentity(window) {
-    return `${normalize(window.get_wm_class?.())} ${normalize(window.get_gtk_application_id?.())}`;
+    return `${canonicalAppIdentity(window.get_wm_class?.())} ${canonicalAppIdentity(window.get_gtk_application_id?.())}`;
 }
 
 function matchesAppHint(window, appHint) {
-    const sourceApp = normalize(appHint);
+    const sourceApp = canonicalAppIdentity(appHint);
     const identity = appIdentity(window);
     if (sourceApp === 'antigravity')
         return identity.includes('antigravity');
@@ -121,6 +181,8 @@ function targetMatchStrength(window, callerPid, projectHint, titleFingerprint, a
         titlesCompatible(titleFingerprint, title);
     const pidMatches = isPidInAncestry(window.get_pid(), callerPid);
 
+    if (pidMatches && titleMatches)
+        return 4;
     if (pidMatches)
         return 3;
     if (titleMatches)
@@ -128,8 +190,93 @@ function targetMatchStrength(window, callerPid, projectHint, titleFingerprint, a
     return matchesAppHint(window, appHint) ? 1 : 0;
 }
 
-function matchesTarget(window, callerPid, projectHint, titleFingerprint, appHint) {
-    return targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint) > 0;
+function selectTargetWindow(callerPid, projectHint, titleFingerprint, appHint) {
+    const scoredCandidates = global.get_window_actors()
+        .map(actor => actor.get_meta_window())
+        .map(window => ({
+            window,
+            strength: targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint),
+        }))
+        .filter(candidate => candidate.strength > 0);
+
+    const bestStrength = scoredCandidates.reduce(
+        (best, candidate) => Math.max(best, candidate.strength),
+        0
+    );
+    const candidates = scoredCandidates.filter(candidate => candidate.strength === bestStrength);
+    return candidates.length === 1 ? candidates[0].window : null;
+}
+
+function selectTargetWindowV3(callerPidChain, projectHint, titleFingerprint, appHint) {
+    const pids = Array.from(callerPidChain ?? []).filter(pid => Number(pid) > 1);
+    const scoredCandidates = global.get_window_actors()
+        .map(actor => actor.get_meta_window())
+        .map(window => ({
+            window,
+            strength: pids.reduce(
+                (best, pid) => Math.max(
+                    best,
+                    targetMatchStrength(window, pid, projectHint, titleFingerprint, appHint)
+                ),
+                targetMatchStrength(window, 0, projectHint, titleFingerprint, appHint)
+            ),
+        }))
+        .filter(candidate => candidate.strength > 0);
+    const bestStrength = scoredCandidates.reduce(
+        (best, candidate) => Math.max(best, candidate.strength),
+        0
+    );
+    const candidates = scoredCandidates.filter(candidate => candidate.strength === bestStrength);
+    return candidates.length === 1 ? candidates[0].window : null;
+}
+
+function windowToken(window) {
+    return `wayland:${window.get_stable_sequence()}`;
+}
+
+function captureWindowByTitleMarker(titleMarker) {
+    const marker = String(titleMarker ?? '').trim();
+    if (!marker.startsWith('anoti-capture-') || marker.length > 100)
+        return [false, '', 0, '', ''];
+    const candidates = global.get_window_actors()
+        .map(actor => actor.get_meta_window())
+        .filter(window => isSupportedWindow(window) && isDeveloperWindow(window))
+        .filter(window => String(window.get_title() ?? '').includes(marker));
+    if (candidates.length !== 1)
+        return [false, '', 0, '', ''];
+    const targetWindow = candidates[0];
+    return [
+        true,
+        windowToken(targetWindow),
+        targetWindow.get_pid(),
+        String(targetWindow.get_title() ?? ''),
+        appIdentity(targetWindow),
+    ];
+}
+
+function selectTargetWindowV4(
+    requestedToken, windowPid, callerPidChain, projectHint, titleFingerprint, appHint
+) {
+    const token = String(requestedToken ?? '').trim();
+    if (!token)
+        return selectTargetWindowV3(callerPidChain, projectHint, titleFingerprint, appHint);
+
+    const candidates = global.get_window_actors()
+        .map(actor => actor.get_meta_window())
+        .filter(window => isSupportedWindow(window) && isDeveloperWindow(window))
+        .filter(window => windowToken(window) === token);
+    if (candidates.length !== 1)
+        return null;
+
+    const targetWindow = candidates[0];
+    const expectedPid = Number(windowPid) || 0;
+    if (expectedPid > 1)
+        return targetWindow.get_pid() === expectedPid ? targetWindow : null;
+
+    const expectedTitle = String(titleFingerprint ?? '').trim();
+    return expectedTitle && titlesCompatible(expectedTitle, targetWindow.get_title())
+        ? targetWindow
+        : null;
 }
 
 export default class AiAgentNotifierWindowFocus extends Extension {
@@ -160,24 +307,11 @@ export default class AiAgentNotifierWindowFocus extends Extension {
     }
 
     _focusWindow(callerPid, projectHint, titleFingerprint, appHint) {
-        const scoredCandidates = global.get_window_actors()
-            .map(actor => actor.get_meta_window())
-            .map(window => ({
-                window,
-                strength: targetMatchStrength(window, callerPid, projectHint, titleFingerprint, appHint),
-            }))
-            .filter(candidate => candidate.strength > 0);
-
-        const bestStrength = scoredCandidates.reduce(
-            (best, candidate) => Math.max(best, candidate.strength),
-            0
-        );
-        const candidates = scoredCandidates.filter(candidate => candidate.strength === bestStrength);
-
-        if (candidates.length !== 1)
+        const targetWindow = selectTargetWindow(callerPid, projectHint, titleFingerprint, appHint);
+        if (!targetWindow)
             return false;
 
-        Main.activateWindow(candidates[0].window, global.get_current_time());
+        Main.activateWindow(targetWindow, global.get_current_time());
         return true;
     }
 
@@ -189,8 +323,68 @@ export default class AiAgentNotifierWindowFocus extends Extension {
         return this._focusWindow(callerPid, projectHint, titleFingerprint, appHint);
     }
 
+    GetContractVersion() {
+        return 5;
+    }
+
+    FocusWindowV3(callerPidChain, projectHint, titleFingerprint, appHint) {
+        const targetWindow = selectTargetWindowV3(
+            callerPidChain, projectHint, titleFingerprint, appHint
+        );
+        if (!targetWindow)
+            return false;
+        Main.activateWindow(targetWindow, global.get_current_time());
+        return true;
+    }
+
+    FocusWindowV4(windowTokenValue, windowPid, callerPidChain, projectHint, titleFingerprint, appHint) {
+        const targetWindow = selectTargetWindowV4(
+            windowTokenValue, windowPid, callerPidChain, projectHint, titleFingerprint, appHint
+        );
+        if (!targetWindow)
+            return false;
+        Main.activateWindow(targetWindow, global.get_current_time());
+        return true;
+    }
+
     IsWindowActive(callerPid, projectHint, titleFingerprint, appHint) {
         const activeWindow = global.display.get_focus_window?.() ?? global.display.focus_window ?? null;
-        return matchesTarget(activeWindow, callerPid, projectHint, titleFingerprint, appHint);
+        const targetWindow = selectTargetWindow(callerPid, projectHint, titleFingerprint, appHint);
+        return Boolean(activeWindow && targetWindow && activeWindow === targetWindow);
+    }
+
+    IsWindowActiveV3(callerPidChain, projectHint, titleFingerprint, appHint) {
+        const activeWindow = global.display.get_focus_window?.() ?? global.display.focus_window ?? null;
+        const targetWindow = selectTargetWindowV3(
+            callerPidChain, projectHint, titleFingerprint, appHint
+        );
+        return Boolean(activeWindow && targetWindow && activeWindow === targetWindow);
+    }
+
+    IsWindowActiveV4(windowTokenValue, windowPid, callerPidChain, projectHint, titleFingerprint, appHint) {
+        const activeWindow = global.display.get_focus_window?.() ?? global.display.focus_window ?? null;
+        const targetWindow = selectTargetWindowV4(
+            windowTokenValue, windowPid, callerPidChain, projectHint, titleFingerprint, appHint
+        );
+        return Boolean(activeWindow && targetWindow && activeWindow === targetWindow);
+    }
+
+    CaptureActiveWindowV3(callerPidChain, projectHint, appHint) {
+        const activeWindow = global.display.get_focus_window?.() ?? global.display.focus_window ?? null;
+        if (!activeWindow || !isSupportedWindow(activeWindow) || !isDeveloperWindow(activeWindow))
+            return [false, '', 0, '', ''];
+        const matched = Array.from(callerPidChain ?? []).some(pid =>
+            isPidInAncestry(activeWindow.get_pid(), pid)
+        );
+        const title = String(activeWindow.get_title() ?? '');
+        const hint = normalize(projectHint);
+        if (!matched && !(hint && normalize(title).includes(hint)))
+            return [false, '', 0, '', ''];
+        const token = windowToken(activeWindow);
+        return [true, token, activeWindow.get_pid(), title, appIdentity(activeWindow) || appHint];
+    }
+
+    CaptureWindowByTitleV5(titleMarker) {
+        return captureWindowByTitleMarker(titleMarker);
     }
 }

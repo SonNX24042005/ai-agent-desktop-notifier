@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "artifacts": [
+    {"id":"runtime-linux","platform":"linux","path":".local/bin/anoti","source":"self","owned":true},
+    {"id":"runtime-windows","platform":"windows","path":".local/bin/anoti.exe","source":"self","owned":true},
+    {"id":"wrapper-windows","platform":"windows","path":".local/bin/anoti.cmd","source":"generated:windows-wrapper","owned":true},
+    {"id":"gnome-metadata","platform":"linux","path":".local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005/metadata.json","source":"embedded:gnome-metadata","owned":true},
+    {"id":"gnome-extension","platform":"linux","path":".local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005/extension.js","source":"embedded:gnome-auto","owned":true},
+    {"id":"claude-hooks","platform":"both","path":".claude/settings.json","source":"managed:claude","owned":false},
+    {"id":"codex-notify","platform":"both","path":".codex/config.toml","source":"managed:codex","owned":false},
+    {"id":"codex-hooks","platform":"both","path":".codex/hooks.json","source":"managed:codex-hooks","owned":false},
+    {"id":"antigravity-hooks","platform":"both","path":".gemini/settings.json","source":"managed:antigravity","owned":false},
+    {"id":"antigravity-json-hooks","platform":"both","path":".gemini/config/hooks.json","source":"managed:antigravity-json-hooks","owned":false},
+    {"id":"install-state","platform":"both","path":".config/ai-agent-notifier/install-state.json","source":"generated:install-state","owned":true},
+    {"id":"rollback-runtime","platform":"both","path":".config/ai-agent-notifier/rollback/anoti","source":"generated:rollback","owned":true}
+  ]
+}

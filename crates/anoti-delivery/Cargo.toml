@@ -1,0 +1,24 @@
+[package]
+name = "anoti-delivery"
+description = "Platform-neutral outbound delivery policy for anoti"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anoti-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "2.12", features = ["json"] }
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+{
+  "schema_version": 3,
+  "window_id": "12345",
+  "window_id_dec": "12345",
+  "project_hint": "ai-agent-desktop-notifier",
+  "pid": 700,
+  "window_pid": 700,
+  "caller_pid": 900,
+  "caller_pid_chain": [900, 800, 700],
+  "app_hint": "Codex",
+  "title_fingerprint": "ai-agent-desktop-notifier - Codex",
+  "precision": "window",
+  "backend": "x11",
+  "updated_at": 1770000000.0
+}
+

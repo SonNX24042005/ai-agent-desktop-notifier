@@ -1,0 +1,19 @@
+{
+  "app_name": "Claude Code",
+  "title": "Claude Code: Yêu cầu quyền",
+  "message": "Cần xác nhận",
+  "questions_json": "",
+  "urgency": "critical",
+  "event_type": "permission",
+  "sound": "",
+  "target_window_id": "12345",
+  "caller_pid": 900,
+  "caller_pid_chain": [900, 800],
+  "project_hint": "project",
+  "session_id": "session-1",
+  "timeout": 0,
+  "status": "displaying",
+  "generation": 4,
+  "created_at": 1770000000.0
+}
+

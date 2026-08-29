@@ -24,3 +24,6 @@ reference/
 *.tmp
 .env
 tmp/
+
+# Rust build artifacts
+target/

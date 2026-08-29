@@ -1,0 +1,15 @@
+[package]
+name = "anoti-platform"
+description = "Platform capability contracts for anoti"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anoti-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+

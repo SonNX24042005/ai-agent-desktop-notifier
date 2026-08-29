@@ -1,0 +1,38 @@
+[
+  {
+    "agent": "claude",
+    "input": {"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Bạn chọn phương án nào?"}]},"session_id":"claude-1","cwd":"/workspace/alpha"},
+    "response": "",
+    "action": "notify",
+    "app_name": "Claude Code",
+    "event_type": "question",
+    "urgency": "critical",
+    "message": "Bạn chọn phương án nào?"
+  },
+  {
+    "agent": "codex",
+    "input": {"hook_event_name":"PermissionRequest","tool_name":"execute_command","tool_input":{"description":"Chạy kiểm thử"},"session_id":"codex-1"},
+    "response": "",
+    "action": "notify",
+    "app_name": "Codex",
+    "event_type": "permission",
+    "urgency": "critical",
+    "message": "Chạy kiểm thử"
+  },
+  {
+    "agent": "antigravity",
+    "input": {"conversationId":"agy-1","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Tiếp tục?"}]}}},
+    "response": "{\"decision\": \"allow\"}",
+    "action": "notify",
+    "app_name": "Antigravity",
+    "event_type": "question",
+    "urgency": "critical",
+    "message": "Tiếp tục?"
+  },
+  {
+    "agent": "antigravity",
+    "input": {"conversationId":"agy-2","toolCall":{"name":"run_command"}},
+    "response": "{\"decision\": \"allow\"}",
+    "action": "dismiss"
+  }
+]
