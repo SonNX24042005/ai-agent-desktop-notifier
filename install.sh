@@ -28,4 +28,4 @@ echo "Đang biên dịch runtime Rust..."
 (cd "$SCRIPT_DIR" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cargo build --release -p anoti-app)
 "$SCRIPT_DIR/target/release/anoti" install
 
-echo "Đã cài runtime Rust. Trên Wayland, hãy đăng xuất rồi đăng nhập lại nếu GNOME Shell chưa nạp extension mới."
+echo "Đã cài runtime Rust."

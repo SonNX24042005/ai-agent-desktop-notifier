@@ -7,6 +7,7 @@
     "app_name": "Claude Code",
     "event_type": "question",
     "urgency": "critical",
+    "icon": "claude",
     "message": "Bạn chọn phương án nào?"
   },
   {
@@ -17,6 +18,7 @@
     "app_name": "Codex",
     "event_type": "permission",
     "urgency": "critical",
+    "icon": "codex",
     "message": "Chạy kiểm thử"
   },
   {
@@ -27,12 +29,24 @@
     "app_name": "Antigravity",
     "event_type": "question",
     "urgency": "critical",
+    "icon": "antigravity",
     "message": "Tiếp tục?"
   },
   {
     "agent": "antigravity",
     "input": {"conversationId":"agy-2","toolCall":{"name":"run_command"}},
     "response": "{\"decision\": \"allow\"}",
-    "action": "dismiss"
+    "action": "none"
+  },
+  {
+    "agent": "antigravity",
+    "input": {"conversationId":"agy-3","executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":true},
+    "response": "{}",
+    "action": "notify",
+    "app_name": "Antigravity",
+    "event_type": "complete",
+    "urgency": "normal",
+    "icon": "antigravity",
+    "message": "Antigravity đã hoàn thành trả lời."
   }
 ]

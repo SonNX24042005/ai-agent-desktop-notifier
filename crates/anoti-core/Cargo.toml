@@ -1,6 +1,6 @@
 [package]
 name = "anoti-core"
-description = "Platform-neutral state, queue and identity logic for anoti"
+description = "Platform-neutral state, deduplication and notification models for anoti"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,6 @@ serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true

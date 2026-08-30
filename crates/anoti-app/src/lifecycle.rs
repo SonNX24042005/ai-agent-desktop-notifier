@@ -12,9 +12,6 @@ use thiserror::Error;
 use wait_timeout::ChildExt;
 
 const MANIFEST_SOURCE: &str = include_str!("../../../artifacts/manifest.json");
-const GNOME_METADATA: &str = include_str!("../../../gnome-shell-extension/metadata.json");
-const GNOME_MODERN: &str = include_str!("../../../gnome-shell-extension/extension-modern.js");
-const GNOME_LEGACY: &str = include_str!("../../../gnome-shell-extension/extension-legacy.js");
 const OWNED_MARKERS: &[&str] = &[
     "anoti hook",
     "hook claude",
@@ -35,6 +32,13 @@ const LEGACY_RUNTIME_ARTIFACTS: &[&str] = &[
     ".gemini/hooks/notify-antigravity.sh",
     ".gemini/hooks/notify-antigravity.py",
 ];
+const LEGACY_RUNTIME_STATE_FILES: &[&str] = &[
+    "ai_agent_notifier_sessions.json",
+    "ai_agent_notifier_sessions.lock",
+    "ai_agent_notifier_queue.json",
+    "ai_agent_notifier_queue.lock",
+    "ai_agent_notifier_overlay.lock",
+];
 
 #[derive(Debug, Error)]
 pub enum LifecycleError {
@@ -48,6 +52,8 @@ pub enum LifecycleError {
     HealthCheck,
     #[error("user profile path is unavailable")]
     ProfileUnavailable,
+    #[error("runtime path discovery failed: {0}")]
+    State(#[from] anoti_core::StateError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,11 +99,6 @@ pub fn installation_report() -> Result<Value, LifecycleError> {
     let profile = profile_root()?;
     let state = load_state(&profile.join(".config/ai-agent-notifier/install-state.json"));
     let runtime = runtime_path(&profile);
-    let extension_path = profile.join(
-        ".local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005/metadata.json",
-    );
-    let expected_extension = serde_json::from_str::<Value>(GNOME_METADATA)?["version"].clone();
-    let installed_extension = read_json(&extension_path)["version"].clone();
     let expected_version = env!("CARGO_PKG_VERSION");
     let installed_version = installed_binary_version(&runtime);
     Ok(json!({
@@ -108,9 +109,6 @@ pub fn installation_report() -> Result<Value, LifecycleError> {
         "version_drift": runtime.is_file() && installed_version.as_deref() != Some(expected_version),
         "runtime_path": runtime,
         "runtime_installed": runtime.is_file(),
-        "gnome_extension_expected": expected_extension,
-        "gnome_extension_installed": installed_extension,
-        "gnome_extension_drift": extension_path.is_file() && installed_extension != expected_extension,
         "manifest_artifacts": manifest()?.artifacts.len(),
     }))
 }
@@ -194,19 +192,6 @@ fn install_or_update(operation: &str, profile: &Path) -> Result<LifecycleReport,
                 write_atomic(&target, b"@echo off\r\n\"%~dp0anoti.exe\" %*\r\n")?;
                 changed += 1;
             }
-            "embedded:gnome-metadata" => {
-                write_atomic(&target, GNOME_METADATA.as_bytes())?;
-                changed += 1;
-            }
-            "embedded:gnome-auto" => {
-                let source = if gnome_shell_major() < 45 {
-                    GNOME_LEGACY
-                } else {
-                    GNOME_MODERN
-                };
-                write_atomic(&target, source.as_bytes())?;
-                changed += 1;
-            }
             "managed:claude" => {
                 merge_json_hooks(&target, &claude_hooks(&runtime))?;
                 changed += 1;
@@ -228,6 +213,9 @@ fn install_or_update(operation: &str, profile: &Path) -> Result<LifecycleReport,
                     merge_codex_config(&target, &runtime, state.previous_codex_notify.take())?;
                 changed += 1;
             }
+            source if source.starts_with("embedded:") && write_embedded_icon(source, &target)? => {
+                changed += 1;
+            }
             _ => {}
         }
         if artifact.owned {
@@ -239,7 +227,8 @@ fn install_or_update(operation: &str, profile: &Path) -> Result<LifecycleReport,
     env!("CARGO_PKG_VERSION").clone_into(&mut state.version);
     save_state(&state_path, &state)?;
     changed += remove_legacy_runtime_artifacts(profile)?;
-    enable_gnome_extension();
+    cleanup_old_gnome_extension(profile)?;
+    cleanup_old_runtime_state(profile)?;
     if runtime != binary && !health_check(&runtime) {
         if rollback_available {
             copy_file(&rollback, &runtime)?;
@@ -284,6 +273,8 @@ fn uninstall(profile: &Path) -> Result<LifecycleReport, LifecycleError> {
         fs::remove_file(&runtime).map_err(|source| io_error(&runtime, source))?;
     }
     changed += remove_legacy_runtime_artifacts(profile)?;
+    cleanup_old_gnome_extension(profile)?;
+    cleanup_old_runtime_state(profile)?;
     Ok(LifecycleReport {
         operation: "uninstall".to_owned(),
         profile: profile.to_path_buf(),
@@ -350,8 +341,7 @@ fn remove_antigravity_namespace(path: &Path) -> Result<(), LifecycleError> {
 fn claude_hooks(binary: &Path) -> Map<String, Value> {
     let command = format!("\"{}\" hook claude", binary.display());
     json!({
-        "SessionStart":[{"hooks":[{"type":"command","command":command}]}],
-        "PreToolUse":[{"matcher":"AskUserQuestion","hooks":[{"type":"command","command":command}]}],
+        "PreToolUse":[{"matcher":"AskUserQuestion|ask_question","hooks":[{"type":"command","command":command}]}],
         "Notification":[{"matcher":"permission_prompt|agent_completed","hooks":[{"type":"command","command":command}]}],
         "Stop":[{"hooks":[{"type":"command","command":command}]}]
     }).as_object().cloned().unwrap_or_default()
@@ -360,7 +350,6 @@ fn claude_hooks(binary: &Path) -> Map<String, Value> {
 fn codex_hooks(binary: &Path) -> Map<String, Value> {
     let command = format!("\"{}\" hook codex", binary.display());
     json!({
-        "SessionStart":[{"hooks":[{"type":"command","command":command,"timeout":5}]}],
         "PermissionRequest":[{"hooks":[{"type":"command","command":command,"timeout":5}]}]
     })
     .as_object()
@@ -381,22 +370,54 @@ fn remove_legacy_runtime_artifacts(profile: &Path) -> Result<usize, LifecycleErr
 }
 
 #[cfg(target_os = "linux")]
-fn enable_gnome_extension() {
-    let _ = Command::new("gnome-extensions")
-        .args(["enable", "ai-agent-desktop-notifier@sonnx24042005"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+fn is_real_user_home_profile(profile: &Path) -> bool {
+    if env::var_os("AI_AGENT_NOTIFIER_PROFILE_ROOT").is_some() {
+        return false;
+    }
+    env::var_os("HOME").is_some_and(|home| home == profile.as_os_str())
 }
 
-#[cfg(not(target_os = "linux"))]
-fn enable_gnome_extension() {}
+fn cleanup_old_gnome_extension(profile: &Path) -> Result<(), LifecycleError> {
+    #[cfg(target_os = "linux")]
+    {
+        if is_real_user_home_profile(profile) {
+            let _ = Command::new("gnome-extensions")
+                .args(["disable", "ai-agent-desktop-notifier@sonnx24042005"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let extension_dir =
+        profile.join(".local/share/gnome-shell/extensions/ai-agent-desktop-notifier@sonnx24042005");
+    if extension_dir.exists() {
+        fs::remove_dir_all(&extension_dir).map_err(|source| io_error(&extension_dir, source))?;
+    }
+    Ok(())
+}
+
+fn cleanup_old_runtime_state(profile: &Path) -> Result<(), LifecycleError> {
+    let runtime_dir = profile.join(".config/ai-agent-notifier/runtime");
+    for file_name in LEGACY_RUNTIME_STATE_FILES {
+        let path = runtime_dir.join(file_name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+        }
+    }
+    let paths = anoti_core::RuntimePaths::discover()?;
+    for file_name in LEGACY_RUNTIME_STATE_FILES {
+        let path = paths.root.join(file_name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+        }
+    }
+    Ok(())
+}
 
 fn antigravity_hooks(binary: &Path) -> Map<String, Value> {
     let command = format!("\"{}\" hook antigravity", binary.display());
     json!({
-        "PreInvocation":[{"type":"command","command":command,"timeout":5}],
         "PreToolUse":[{"matcher":"ask_question|AskQuestion|AskUserQuestion","hooks":[{"type":"command","command":command,"timeout":10}]}],
         "Stop":[{"type":"command","command":command,"timeout":10}],
         "Notification":[{"matcher":"permission_prompt|idle_prompt|agent_needs_input|agent_completed","hooks":[{"type":"command","command":command,"timeout":10}]}]
@@ -493,6 +514,27 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), LifecycleError> {
     fs::rename(&temporary, path).map_err(|source| io_error(path, source))
 }
 
+fn write_embedded_icon(source: &str, target: &Path) -> Result<bool, LifecycleError> {
+    let bytes: Option<&'static [u8]> = match source {
+        "embedded:icon-anoti" => Some(include_bytes!("../../../assets/icons/anoti.png")),
+        "embedded:icon-claude" => Some(include_bytes!("../../../assets/icons/claude.png")),
+        "embedded:icon-codex" => Some(include_bytes!("../../../assets/icons/codex.png")),
+        "embedded:icon-antigravity" => {
+            Some(include_bytes!("../../../assets/icons/antigravity.png"))
+        }
+        "embedded:icon-anoti-svg" => Some(include_bytes!("../../../assets/icons/anoti.svg")),
+        "embedded:icon-claude-svg" => Some(include_bytes!("../../../assets/icons/claude.svg")),
+        "embedded:icon-codex-svg" => Some(include_bytes!("../../../assets/icons/codex.svg")),
+        _ => None,
+    };
+    if let Some(content) = bytes {
+        write_atomic(target, content)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), LifecycleError> {
     use std::os::unix::fs::PermissionsExt;
@@ -515,13 +557,6 @@ fn health_check(binary: &Path) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn gnome_shell_major() -> u32 {
-    env::var("AI_AGENT_NOTIFIER_GNOME_MAJOR")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(45)
 }
 
 fn io_error(path: &Path, source: io::Error) -> LifecycleError {
@@ -554,6 +589,10 @@ mod tests {
             "codex-notify",
             "antigravity-hooks",
             "antigravity-json-hooks",
+            "icon-anoti",
+            "icon-claude",
+            "icon-codex",
+            "icon-antigravity",
             "install-state",
             "rollback-runtime",
         ] {

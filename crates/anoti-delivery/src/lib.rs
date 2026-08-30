@@ -28,62 +28,13 @@ pub struct WebhookEndpoint {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct OverlayState {
-    pub focus_in_flight: bool,
-    pub closed: bool,
-    pub dismissed: bool,
-    active_since: Option<f64>,
-}
-
-impl OverlayState {
-    pub fn request_focus(&mut self) -> bool {
-        if self.closed || self.focus_in_flight {
-            return false;
-        }
-        self.focus_in_flight = true;
-        true
-    }
-
-    pub fn complete_focus(&mut self, verified: bool) {
-        self.focus_in_flight = false;
-        if verified {
-            self.closed = true;
-        }
-    }
-
-    pub fn dismiss(&mut self) {
-        self.dismissed = true;
-        self.closed = true;
-    }
-
-    pub fn background_click(&mut self, originated_from_button: bool) {
-        if !originated_from_button {
-            self.dismiss();
-        }
-    }
-
-    pub fn poll_active(&mut self, now: f64, active: bool, delay: f64) -> bool {
-        if !active {
-            self.active_since = None;
-            return false;
-        }
-        let active_since = *self.active_since.get_or_insert(now);
-        if now - active_since >= delay.max(0.0) {
-            self.dismiss();
-            return true;
-        }
-        false
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookFailure {
     pub endpoint_name: String,
     pub reason: String,
 }
 
-/// Sends only approved presentation fields; identity and questions stay local.
+/// Sends only approved presentation fields.
 #[must_use]
 pub fn dispatch_webhooks(
     endpoints: &[WebhookEndpoint],
@@ -251,36 +202,5 @@ mod tests {
                 .iter()
                 .all(|endpoint| endpoint.url.starts_with("http"))
         );
-    }
-
-    #[test]
-    fn overlay_focus_is_single_flight_and_failure_does_not_close() {
-        let mut state = OverlayState::default();
-        assert!(state.request_focus());
-        assert!(!state.request_focus());
-        state.complete_focus(false);
-        assert!(!state.closed);
-        assert!(state.request_focus());
-        state.complete_focus(true);
-        assert!(state.closed);
-    }
-
-    #[test]
-    fn button_click_is_not_consumed_as_background_dismiss() {
-        let mut state = OverlayState::default();
-        state.background_click(true);
-        assert!(!state.closed);
-        state.background_click(false);
-        assert!(state.dismissed);
-    }
-
-    #[test]
-    fn auto_dismiss_requires_continuous_activity() {
-        let mut state = OverlayState::default();
-        assert!(!state.poll_active(1.0, true, 1.5));
-        assert!(!state.poll_active(2.0, false, 1.5));
-        assert!(!state.poll_active(3.0, true, 1.5));
-        assert!(state.poll_active(4.5, true, 1.5));
-        assert!(state.dismissed);
     }
 }

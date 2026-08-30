@@ -1,6 +1,6 @@
 [package]
 name = "anoti-platform-linux"
-description = "Linux X11, XWayland and GNOME Wayland backend for anoti"
+description = "Linux native desktop notification backend for anoti"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,10 @@ license.workspace = true
 
 [dependencies]
 anoti-core.workspace = true
-anoti-delivery.workspace = true
 anoti-platform.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["randr"] }
 zbus = { version = "4.4", default-features = false, features = ["async-io", "blocking"] }
-gtk = { version = "0.18", features = ["v3_24"] }
-atspi = { version = "0.30", default-features = false, features = ["proxies", "zbus"] }
-async-io = "2"
 wait-timeout = "0.2"
 
 [lints]

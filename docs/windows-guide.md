@@ -6,32 +6,26 @@
 - PowerShell 5.1 trở lên.
 - Git và Rust toolchain có Cargo.
 
-Python không còn là dependency runtime.
-
 ## Cài đặt
 
 ```powershell
 irm https://raw.githubusercontent.com/SonNX24042005/ai-agent-desktop-notifier/master/install.ps1 | iex
 ```
 
-Installer tải mã nguồn khi chạy từ xa, build `anoti.exe` với tối đa hai job mặc định, cài binary vào `%USERPROFILE%\.local\bin` và merge hook của Claude Code, Codex, Antigravity.
+Bộ cài đặt tải mã nguồn khi chạy từ xa, build `anoti.exe` với tối đa hai job mặc định, cài binary vào `%USERPROFILE%\.local\bin` và cấu hình hook của Claude Code, Codex, Antigravity.
 
 ## Hoạt động
 
-Backend Windows dùng Win32 để:
+Backend Windows sử dụng WinRT/Win32 để:
 
-- chụp HWND, PID và tiêu đề cửa sổ đầu phiên;
-- phân biệt nhiều cửa sổ cùng ứng dụng bằng HWND exact;
-- phục hồi cửa sổ thu nhỏ và xác minh foreground sau focus;
-- lấy monitor và DPI cho overlay;
-- gửi Windows toast làm đường thông báo native.
-
-Mỗi popup dùng identity snapshot trong queue và tự đóng sau khi cửa sổ đích active ổn định.
+- phát Windows toast notification native chuẩn;
+- phát âm thanh thông báo hệ thống qua `PlaySoundW`;
+- chống trùng lặp thông báo trong 2 giây;
+- gửi webhook bất đồng bộ tới các dịch vụ từ xa nếu được cấu hình.
 
 ## Lệnh
 
 ```powershell
-anoti focus
 anoti doctor
 anoti status
 anoti test
@@ -42,4 +36,4 @@ anoti uninstall
 
 Nếu PowerShell mới chưa nhận `anoti`, hãy mở terminal mới và bảo đảm `%USERPROFILE%\.local\bin` có trong `Path`.
 
-Mã Windows được kiểm tra bằng unit test/mock khi phát triển trên Linux. Chỉ coi là đã xác minh native sau khi chạy bộ smoke test trên Windows thật.
+Mã Windows được kiểm tra bằng unit test và mock API khi phát triển trên Linux. Chỉ coi là đã xác minh native sau khi chạy kiểm tra trên Windows thật.

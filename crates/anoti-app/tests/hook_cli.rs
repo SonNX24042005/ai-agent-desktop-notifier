@@ -2,10 +2,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anoti_core::{QueueStore, RuntimePaths};
-
 #[test]
-fn antigravity_hook_responds_before_detached_queue_work() {
+fn antigravity_hook_responds_synchronously_with_allow() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = directory.path().join("runtime");
     let mut child = Command::new(env!("CARGO_BIN_EXE_anoti"))
@@ -35,26 +33,47 @@ fn antigravity_hook_responds_before_detached_queue_work() {
         r#"{"decision": "allow"}"#
     );
     assert!(started.elapsed() < Duration::from_secs(1));
-
-    let paths = RuntimePaths::from_root(runtime).unwrap();
-    let store = QueueStore::new(paths);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if store.load().unwrap().contains_key("sess_hook-e2e") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "detached action did not reach queue"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[test]
 fn malformed_hook_payload_is_fail_open() {
     let output = Command::new(env!("CARGO_BIN_EXE_anoti"))
         .args(["hook", "antigravity", "{broken"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "{}");
+}
+
+#[test]
+fn claude_hook_processes_notification() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = directory.path().join("runtime");
+    let output = Command::new(env!("CARGO_BIN_EXE_anoti"))
+        .args([
+            "hook",
+            "claude",
+            r#"{"hook_event_name":"Notification","notification_type":"agent_completed","session_id":"claude-e2e"}"#,
+        ])
+        .env("AI_AGENT_NOTIFIER_RUNTIME_DIR", &runtime)
+        .env("AI_AGENT_NOTIFIER_NO_UI", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+#[test]
+fn antigravity_hook_processes_completion() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = directory.path().join("runtime");
+    let output = Command::new(env!("CARGO_BIN_EXE_anoti"))
+        .args([
+            "hook",
+            "antigravity",
+            r#"{"conversationId":"agy-cli-e2e","executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":true}"#,
+        ])
+        .env("AI_AGENT_NOTIFIER_RUNTIME_DIR", &runtime)
+        .env("AI_AGENT_NOTIFIER_NO_UI", "1")
         .output()
         .unwrap();
     assert!(output.status.success());

@@ -19,16 +19,23 @@ pub fn merge_owned_hooks(
         .get_mut("hooks")
         .and_then(Value::as_object_mut)
         .expect("hooks was normalized");
+
+    // Clean up any stale owned entries across all hook events
+    hooks.retain(|_, entries| {
+        let Some(entries) = entries.as_array_mut() else {
+            return true;
+        };
+        entries.retain(|entry| !contains_owned_marker(entry, ownership_markers));
+        !entries.is_empty()
+    });
+
     for (event, additions) in additions {
         let existing = hooks
             .get(event)
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let mut merged = existing
-            .into_iter()
-            .filter(|entry| !contains_owned_marker(entry, ownership_markers))
-            .collect::<Vec<_>>();
+        let mut merged = existing;
         if let Some(entries) = additions.as_array() {
             merged.extend(entries.iter().cloned());
         }

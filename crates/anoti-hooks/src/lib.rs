@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use anoti_core::{EventKind, NotificationRequest, Urgency, WindowIdentity};
+use anoti_core::{EventKind, NotificationRequest, Urgency};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -23,19 +23,6 @@ pub enum Agent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookAction {
-    CaptureSession {
-        app_name: String,
-        session_id: String,
-        project_hint: String,
-        app_hint: String,
-        caller_pid: u32,
-        caller_pid_chain: Vec<u32>,
-        caller_tty: String,
-        terminal_screen: String,
-    },
-    Dismiss {
-        session_id: String,
-    },
     Notify(NotificationRequest),
 }
 
@@ -43,31 +30,25 @@ pub enum HookAction {
 pub struct HookResult {
     /// Text returned synchronously to the agent hook protocol.
     pub response: String,
-    /// Work that the CLI must start asynchronously after writing `response`.
+    /// Work that the CLI must execute after writing `response`.
     pub actions: Vec<HookAction>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HookContext {
     pub caller_pid: u32,
-    pub caller_pid_chain: Vec<u32>,
     pub cwd: PathBuf,
     pub is_windows: bool,
     pub silent: bool,
-    pub caller_tty: String,
-    pub terminal_screen: String,
 }
 
 impl Default for HookContext {
     fn default() -> Self {
         Self {
             caller_pid: 0,
-            caller_pid_chain: Vec::new(),
             cwd: PathBuf::new(),
             is_windows: cfg!(windows),
             silent: false,
-            caller_tty: String::new(),
-            terminal_screen: String::new(),
         }
     }
 }
@@ -117,18 +98,9 @@ fn parse_claude(payload: &Value, raw_payload: &str, context: &HookContext) -> Ho
     let event = first_string(payload, &["hook_event_name", "event"]);
     let notification_type = first_string(payload, &["notification_type", "type", "matcher"]);
     let session_id = first_string(payload, &["session_id", "sessionID", "session"]);
-    let cwd = value_string(payload.get("cwd")).unwrap_or_else(|| path_text(&context.cwd));
-    let project_hint = basename(&cwd);
 
     if event == "SessionStart" || notification_type == "SessionStart" {
-        return capture(
-            "Claude Code",
-            &session_id,
-            &project_hint,
-            "claude",
-            context,
-            Agent::Claude,
-        );
+        return empty_result(Agent::Claude, false);
     }
     if raw_payload.contains("idle_prompt") || raw_payload.contains("agent_needs_input") {
         return empty_result(Agent::Claude, false);
@@ -145,21 +117,21 @@ fn parse_claude(payload: &Value, raw_payload: &str, context: &HookContext) -> Ho
         || event == "Stop";
 
     let request = if is_question {
+        let title = if tool_name.is_empty() {
+            "Claude Code: Câu hỏi".to_owned()
+        } else {
+            format!("Claude Code: Câu hỏi ({tool_name})")
+        };
         notification(
             "Claude Code",
-            "Claude Code: Câu hỏi",
-            &question_text(&tool_input, "Claude đang đặt câu hỏi cho bạn."),
+            &title,
+            &question_text(&tool_input, "Claude Code đang đặt câu hỏi cho bạn."),
             questions_json(&tool_input),
             Urgency::Critical,
             EventKind::Question,
             sound(context, true),
-            identity(
-                &session_id,
-                &project_hint,
-                "claude",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "claude",
         )
     } else if is_permission {
         let title = if tool_name.is_empty() {
@@ -175,13 +147,8 @@ fn parse_claude(payload: &Value, raw_payload: &str, context: &HookContext) -> Ho
             Urgency::Critical,
             EventKind::Permission,
             sound(context, true),
-            identity(
-                &session_id,
-                &project_hint,
-                "claude",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "claude",
         )
     } else if is_completion {
         notification(
@@ -192,13 +159,8 @@ fn parse_claude(payload: &Value, raw_payload: &str, context: &HookContext) -> Ho
             Urgency::Normal,
             EventKind::Complete,
             sound(context, false),
-            identity(
-                &session_id,
-                &project_hint,
-                "claude",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "claude",
         )
     } else {
         return empty_result(Agent::Claude, false);
@@ -210,43 +172,73 @@ fn parse_claude(payload: &Value, raw_payload: &str, context: &HookContext) -> Ho
 }
 
 fn parse_codex(payload: &Value, context: &HookContext) -> HookResult {
-    let event = first_string(payload, &["hook_event_name", "type"]);
+    let event = first_string(payload, &["hook_event_name", "event", "type"]);
     let session_id = first_string(
         payload,
-        &["session_id", "thread-id", "thread_id", "turn-id", "turn_id"],
+        &[
+            "session_id",
+            "thread-id",
+            "thread_id",
+            "turn-id",
+            "turn_id",
+            "sessionId",
+            "conversation_id",
+        ],
     );
-    let project_hint = basename(&path_text(&context.cwd));
+    let is_notify = event == "notify";
+    let is_permission = event == "permission_request" || event == "PermissionRequest";
 
-    if event == "SessionStart" || event == "session_start" {
-        return capture(
-            "Codex",
-            &session_id,
-            &project_hint,
-            "codex",
-            context,
-            Agent::Codex,
-        );
-    }
-
-    let request = if event == "PermissionRequest" {
-        let tool_name =
-            value_string(payload.get("tool_name")).unwrap_or_else(|| "công cụ".to_owned());
-        let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    let request = if is_notify {
+        let title = first_string(payload, &["title", "summary"]);
+        let title = if title.is_empty() {
+            "Codex".to_owned()
+        } else {
+            title
+        };
+        let message = first_string(payload, &["message", "body", "text"]);
+        let urgency = match first_string(payload, &["urgency", "level"]).as_str() {
+            "critical" | "high" => Urgency::Critical,
+            "low" => Urgency::Low,
+            _ => Urgency::Normal,
+        };
+        let event_kind = if urgency == Urgency::Critical {
+            EventKind::Question
+        } else {
+            EventKind::Info
+        };
         notification(
             "Codex",
-            &format!("Codex cần cấp quyền: {tool_name}"),
-            &permission_text(&tool_input, payload, "Codex đang chờ bạn cấp quyền."),
+            &title,
+            &message,
+            String::new(),
+            urgency,
+            event_kind,
+            sound(context, urgency == Urgency::Critical),
+            session_id,
+            "codex",
+        )
+    } else if is_permission {
+        let tool_name = first_string(payload, &["tool_name", "command", "tool"]);
+        let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+        let title = if tool_name.is_empty() {
+            "Codex: Cần cấp quyền".to_owned()
+        } else {
+            format!("Codex: Cần cấp quyền ({tool_name})")
+        };
+        notification(
+            "Codex",
+            &title,
+            &permission_text(
+                &tool_input,
+                payload,
+                "Codex đang chờ bạn cấp quyền tiếp tục.",
+            ),
             questions_json(&tool_input),
             Urgency::Critical,
             EventKind::Permission,
             sound(context, true),
-            identity(
-                &session_id,
-                &project_hint,
-                "codex",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "codex",
         )
     } else if event == "agent-turn-complete" {
         notification(
@@ -257,13 +249,8 @@ fn parse_codex(payload: &Value, context: &HookContext) -> HookResult {
             Urgency::Normal,
             EventKind::Complete,
             sound(context, false),
-            identity(
-                &session_id,
-                &project_hint,
-                "codex",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "codex",
         )
     } else {
         return empty_result(Agent::Codex, false);
@@ -288,25 +275,11 @@ fn parse_antigravity(payload: &Value, context: &HookContext) -> HookResult {
     }
 
     let session_id = first_string(payload, &["conversationId", "session_id", "sessionId"]);
-    let project_hint = payload
-        .get("workspacePaths")
-        .and_then(Value::as_array)
-        .and_then(|paths| paths.first())
-        .and_then(|value| value_string(Some(value)))
-        .map_or_else(
-            || basename(&path_text(&context.cwd)),
-            |path| basename(&path),
-        );
 
-    if payload.get("invocationNum").is_some() || event == "PreInvocation" {
-        return capture(
-            "Antigravity",
-            &session_id,
-            &project_hint,
-            "antigravity",
-            context,
-            Agent::Antigravity,
-        );
+    if payload.get("invocationNum").is_some()
+        || matches!(event.as_str(), "PreInvocation" | "PostInvocation")
+    {
+        return empty_result(Agent::Antigravity, false);
     }
 
     let tool_call = payload.get("toolCall").unwrap_or(&Value::Null);
@@ -320,13 +293,13 @@ fn parse_antigravity(payload: &Value, context: &HookContext) -> HookResult {
         .unwrap_or(Value::Null);
     let is_question = matches!(
         tool_name.as_str(),
-        "ask_question" | "AskUserQuestion" | "ask_user"
+        "ask_question" | "AskQuestion" | "AskUserQuestion" | "ask_user"
     ) || tool_name.to_ascii_lowercase().contains("ask");
 
     if has_tool_call && !is_question {
         return HookResult {
             response: r#"{"decision": "allow"}"#.to_owned(),
-            actions: vec![HookAction::Dismiss { session_id }],
+            actions: Vec::new(),
         };
     }
     if !is_question && !is_genuine_antigravity_completion(payload) {
@@ -367,20 +340,15 @@ fn parse_antigravity(payload: &Value, context: &HookContext) -> HookResult {
             urgency,
             event_kind,
             sound(context, warning),
-            identity(
-                &session_id,
-                &project_hint,
-                "antigravity",
-                context.caller_pid,
-                &context.caller_pid_chain,
-            ),
+            session_id,
+            "antigravity",
         ))],
     }
 }
 
 fn is_genuine_antigravity_completion(payload: &Value) -> bool {
     if payload.get("fullyIdle") == Some(&Value::Bool(false))
-        || payload.get("error").is_some_and(|error| !error.is_null())
+        || has_error_payload(payload)
         || value_string(payload.get("terminationReason"))
             .is_some_and(|reason| reason.eq_ignore_ascii_case("ERROR"))
     {
@@ -411,13 +379,29 @@ fn is_genuine_antigravity_completion(payload: &Value) -> bool {
     true
 }
 
+fn has_error_payload(payload: &Value) -> bool {
+    for key in ["error", "last_error", "lastError"] {
+        if payload.get(key).is_some_and(|error| match error {
+            Value::Null => false,
+            Value::String(s) => !s.trim().is_empty(),
+            Value::Bool(b) => *b,
+            Value::Array(a) => !a.is_empty(),
+            Value::Object(o) => !o.is_empty(),
+            Value::Number(n) => n.as_i64().is_some_and(|code| code != 0),
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 fn read_file_tail(path: &Path, limit: u64) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     file.seek(SeekFrom::Start(len.saturating_sub(limit)))?;
-    let mut data = String::new();
-    file.read_to_string(&mut data)?;
-    Ok(data)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn transcript_allows_completion(data: &str) -> bool {
@@ -475,34 +459,6 @@ fn completed_task_id(content: Option<&Value>) -> Option<String> {
     Some(task_id.to_owned())
 }
 
-fn capture(
-    app_name: &str,
-    session_id: &str,
-    project_hint: &str,
-    app_hint: &str,
-    context: &HookContext,
-    agent: Agent,
-) -> HookResult {
-    let actions = if session_id.is_empty() {
-        Vec::new()
-    } else {
-        vec![HookAction::CaptureSession {
-            app_name: app_name.to_owned(),
-            session_id: session_id.to_owned(),
-            project_hint: project_hint.to_owned(),
-            app_hint: app_hint.to_owned(),
-            caller_pid: context.caller_pid,
-            caller_pid_chain: context.caller_pid_chain.clone(),
-            caller_tty: context.caller_tty.clone(),
-            terminal_screen: context.terminal_screen.clone(),
-        }]
-    };
-    HookResult {
-        response: empty_result(agent, false).response,
-        actions,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn notification(
     app_name: &str,
@@ -512,7 +468,8 @@ fn notification(
     urgency: Urgency,
     event_kind: EventKind,
     sound: String,
-    identity: WindowIdentity,
+    session_id: String,
+    icon: &str,
 ) -> NotificationRequest {
     NotificationRequest {
         app_name: app_name.to_owned(),
@@ -522,26 +479,9 @@ fn notification(
         urgency,
         event_kind,
         sound,
-        identity,
+        session_id,
         timeout: 0,
-        auto_dismiss_delay: 1.5,
-    }
-}
-
-fn identity(
-    session_id: &str,
-    project_hint: &str,
-    app_hint: &str,
-    caller_pid: u32,
-    caller_pid_chain: &[u32],
-) -> WindowIdentity {
-    WindowIdentity {
-        session_id: session_id.to_owned(),
-        project_hint: project_hint.to_owned(),
-        app_hint: app_hint.to_owned(),
-        caller_pid,
-        caller_pid_chain: caller_pid_chain.to_vec(),
-        ..WindowIdentity::default()
+        icon: icon.to_owned(),
     }
 }
 
@@ -567,18 +507,6 @@ fn value_string(value: Option<&Value>) -> Option<String> {
         Value::Number(value) => Some(value.to_string()),
         _ => None,
     }
-}
-
-fn path_text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-fn basename(path: &str) -> String {
-    path.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn questions_json(input: &Value) -> String {
@@ -646,7 +574,6 @@ fn clean_text(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-
     use tempfile::tempdir;
 
     use super::*;
@@ -654,27 +581,21 @@ mod tests {
     fn context() -> HookContext {
         HookContext {
             caller_pid: 42,
-            caller_pid_chain: vec![42, 10, 1],
             cwd: PathBuf::from("/workspace/fallback"),
             is_windows: false,
             silent: false,
-            caller_tty: "/dev/pts/7".to_owned(),
-            terminal_screen: "/org/gnome/Terminal/screen/example".to_owned(),
         }
     }
 
     #[test]
     fn claude_contracts_are_normalized() {
-        let capture = parse(
+        let session_start = parse(
             Agent::Claude,
             r#"{"hook_event_name":"SessionStart","session_id":"s1","cwd":"C:\\work\\alpha"}"#,
             &context(),
         )
         .unwrap();
-        assert!(matches!(
-            &capture.actions[0],
-            HookAction::CaptureSession { project_hint, .. } if project_hint == "alpha"
-        ));
+        assert!(session_start.actions.is_empty());
 
         let question = parse(
             Agent::Claude,
@@ -682,12 +603,11 @@ mod tests {
             &context(),
         )
         .unwrap();
-        let HookAction::Notify(request) = &question.actions[0] else {
-            panic!("expected notification");
-        };
+        let HookAction::Notify(request) = &question.actions[0];
         assert_eq!(request.event_kind, EventKind::Question);
         assert_eq!(request.message, "Tiếp tục?");
         assert_eq!(request.urgency, Urgency::Critical);
+        assert_eq!(request.icon, "claude");
     }
 
     #[test]
@@ -698,11 +618,10 @@ mod tests {
             &context(),
         )
         .unwrap();
-        let HookAction::Notify(request) = &permission.actions[0] else {
-            panic!("expected notification");
-        };
+        let HookAction::Notify(request) = &permission.actions[0];
         assert_eq!(request.event_kind, EventKind::Permission);
         assert_eq!(request.message, "Run tests");
+        assert_eq!(request.icon, "codex");
 
         let complete = parse(
             Agent::Codex,
@@ -714,14 +633,15 @@ mod tests {
             complete.actions.first(),
             Some(HookAction::Notify(NotificationRequest {
                 event_kind: EventKind::Complete,
-                identity: WindowIdentity { session_id, .. },
+                session_id,
+                icon,
                 ..
-            })) if session_id == "thread"
+            })) if session_id == "thread" && icon == "codex"
         ));
     }
 
     #[test]
-    fn antigravity_question_and_dismiss_contracts_are_normalized() {
+    fn antigravity_question_and_tool_contracts_are_normalized() {
         let question = parse(
             Agent::Antigravity,
             r#"{"conversationId":"a1","toolCall":{"name":"ask_question","args":{"questions":[{"question":"Chọn gì?"}]}}}"#,
@@ -729,13 +649,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(question.response, r#"{"decision": "allow"}"#);
-        assert!(matches!(
-            question.actions.first(),
-            Some(HookAction::Notify(NotificationRequest {
-                event_kind: EventKind::Question,
-                ..
-            }))
-        ));
+        let Some(HookAction::Notify(request)) = question.actions.first() else {
+            panic!("expected notification");
+        };
+        assert_eq!(request.event_kind, EventKind::Question);
+        assert_eq!(request.icon, "antigravity");
 
         let other = parse(
             Agent::Antigravity,
@@ -743,10 +661,8 @@ mod tests {
             &context(),
         )
         .unwrap();
-        assert!(matches!(
-            other.actions.first(),
-            Some(HookAction::Dismiss { session_id }) if session_id == "a1"
-        ));
+        assert_eq!(other.response, r#"{"decision": "allow"}"#);
+        assert!(other.actions.is_empty());
     }
 
     #[test]
@@ -798,7 +714,7 @@ mod tests {
             concat!(
                 r#"{"status":"RUNNING","content":"task id: job-1 now"}"#,
                 "\n",
-                r#"{"source":"SYSTEM","type":"SYSTEM_MESSAGE","content":"Task id \"job-1\" finished with result ok"}"#,
+                r#"{"source":"SYSTEM","type":"SYSTEM_MESSAGE","content":"Task id \"job-1\" finished with result: ok"}"#,
                 "\n",
                 r#"{"source":"MODEL","type":"PLANNER_RESPONSE","tool_calls":[]}"#,
                 "\n"
@@ -811,11 +727,9 @@ mod tests {
             "transcriptPath": transcript,
         })
         .to_string();
+        let result = parse(Agent::Antigravity, &raw, &context()).unwrap();
         assert!(matches!(
-            parse(Agent::Antigravity, &raw, &context())
-                .unwrap()
-                .actions
-                .first(),
+            result.actions.first(),
             Some(HookAction::Notify(NotificationRequest {
                 event_kind: EventKind::Complete,
                 ..
@@ -824,28 +738,114 @@ mod tests {
     }
 
     #[test]
-    fn silence_and_idle_never_schedule_work() {
-        let mut silent = context();
-        silent.silent = true;
+    fn antigravity_completion_accepts_real_world_stop_payload_with_empty_error() {
+        let raw = serde_json::json!({
+            "executionNum": 1,
+            "terminationReason": "model_stop",
+            "error": "",
+            "fullyIdle": true,
+            "conversationId": "agy-real-conv",
+            "workspacePaths": ["/workspace/test"],
+            "modelName": "auto"
+        })
+        .to_string();
+        let result = parse(Agent::Antigravity, &raw, &context()).unwrap();
+        assert_eq!(result.response, "{}");
+        let Some(HookAction::Notify(request)) = result.actions.first() else {
+            panic!("expected notification action for real-world completion");
+        };
+        assert_eq!(request.event_kind, EventKind::Complete);
+        assert_eq!(request.app_name, "Antigravity");
+        assert_eq!(request.title, "Antigravity: Hoàn thành");
+        assert_eq!(request.message, "Antigravity đã hoàn thành trả lời.");
+        assert_eq!(request.urgency, Urgency::Normal);
+        assert_eq!(request.session_id, "agy-real-conv");
+        assert_eq!(request.icon, "antigravity");
+    }
+
+    #[test]
+    fn antigravity_completion_rejects_actual_error_and_error_reason() {
+        let with_error_msg = serde_json::json!({
+            "executionNum": 1,
+            "terminationReason": "model_stop",
+            "error": "syntax error in user script",
+            "fullyIdle": true,
+            "conversationId": "agy-err-1"
+        })
+        .to_string();
         assert!(
-            parse(
-                Agent::Claude,
-                r#"{"notification_type":"agent_completed"}"#,
-                &silent
-            )
-            .unwrap()
-            .actions
-            .is_empty()
+            parse(Agent::Antigravity, &with_error_msg, &context())
+                .unwrap()
+                .actions
+                .is_empty()
         );
+
+        let with_error_reason = serde_json::json!({
+            "executionNum": 1,
+            "terminationReason": "error",
+            "error": "",
+            "fullyIdle": true,
+            "conversationId": "agy-err-2"
+        })
+        .to_string();
         assert!(
-            parse(
-                Agent::Antigravity,
-                r#"{"notification_type":"idle_prompt"}"#,
-                &context()
-            )
-            .unwrap()
-            .actions
-            .is_empty()
+            parse(Agent::Antigravity, &with_error_reason, &context())
+                .unwrap()
+                .actions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn antigravity_completion_rejects_busy_or_invocation_lifecycle() {
+        let not_idle = serde_json::json!({
+            "executionNum": 1,
+            "terminationReason": "model_stop",
+            "error": "",
+            "fullyIdle": false,
+            "conversationId": "agy-busy"
+        })
+        .to_string();
+        assert!(
+            parse(Agent::Antigravity, &not_idle, &context())
+                .unwrap()
+                .actions
+                .is_empty()
+        );
+
+        let pre_invocation = serde_json::json!({
+            "invocationNum": 1,
+            "initialNumSteps": 5,
+            "conversationId": "agy-pre"
+        })
+        .to_string();
+        let result_pre = parse(Agent::Antigravity, &pre_invocation, &context()).unwrap();
+        assert_eq!(result_pre.response, "{}");
+        assert!(result_pre.actions.is_empty());
+
+        let post_invocation = serde_json::json!({
+            "hook_event_name": "PostInvocation",
+            "invocationNum": 1,
+            "conversationId": "agy-post"
+        })
+        .to_string();
+        let result_post = parse(Agent::Antigravity, &post_invocation, &context()).unwrap();
+        assert_eq!(result_post.response, "{}");
+        assert!(result_post.actions.is_empty());
+    }
+
+    #[test]
+    fn antigravity_completion_rejects_execution_num_without_stop_signal() {
+        let only_execution_num = serde_json::json!({
+            "executionNum": 1,
+            "conversationId": "agy-no-stop"
+        })
+        .to_string();
+        assert!(
+            parse(Agent::Antigravity, &only_execution_num, &context())
+                .unwrap()
+                .actions
+                .is_empty()
         );
     }
 }

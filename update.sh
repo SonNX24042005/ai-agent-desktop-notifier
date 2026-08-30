@@ -27,4 +27,4 @@ echo "Đang biên dịch bản cập nhật Rust từ mã nguồn hiện tại..
 (cd "$SCRIPT_DIR" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cargo build --release -p anoti-app)
 "$SCRIPT_DIR/target/release/anoti" update
 
-echo "Đã cập nhật runtime Rust. Trên Wayland, hãy đăng xuất rồi đăng nhập lại nếu GNOME Shell chưa nạp extension mới."
+echo "Đã cập nhật runtime Rust."

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="anoti-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#4338CA"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#anoti-grad)"/>
+  <path d="M64 26 C48 26 38 38 38 56 C38 72 32 80 26 84 C30 84 98 84 102 84 C96 80 90 72 90 56 C90 38 80 26 64 26 Z" fill="#FFFFFF"/>
+  <path d="M54 90 C54 95.5 58.5 100 64 100 C69.5 100 74 95.5 74 90 Z" fill="#FFFFFF"/>
+  <circle cx="86" cy="38" r="8" fill="#38BDF8"/>
+</svg>

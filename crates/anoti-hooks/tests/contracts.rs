@@ -10,12 +10,9 @@ fn rust_matches_locked_legacy_hook_contracts() {
         serde_json::from_str(include_str!("fixtures/legacy-hook-contracts.json")).unwrap();
     let context = HookContext {
         caller_pid: 42,
-        caller_pid_chain: vec![42, 10, 1],
         cwd: PathBuf::from("/workspace/fallback"),
         is_windows: false,
         silent: false,
-        caller_tty: String::new(),
-        terminal_screen: String::new(),
     };
     for fixture in fixtures {
         let agent = match fixture["agent"].as_str().unwrap() {
@@ -28,10 +25,7 @@ fn rust_matches_locked_legacy_hook_contracts() {
         let result = parse(agent, &input, &context).unwrap();
         assert_eq!(result.response, fixture["response"].as_str().unwrap());
         match fixture["action"].as_str().unwrap() {
-            "dismiss" => assert!(matches!(
-                result.actions.first(),
-                Some(HookAction::Dismiss { .. })
-            )),
+            "none" => assert!(result.actions.is_empty()),
             "notify" => {
                 let Some(HookAction::Notify(request)) = result.actions.first() else {
                     panic!("expected notify action for {agent:?}");
@@ -51,6 +45,9 @@ fn rust_matches_locked_legacy_hook_contracts() {
                 };
                 assert_eq!(request.event_kind, expected_event);
                 assert_eq!(request.urgency, expected_urgency);
+                if let Some(expected_icon) = fixture.get("icon").and_then(Value::as_str) {
+                    assert_eq!(request.icon, expected_icon);
+                }
             }
             action => panic!("unknown fixture action: {action}"),
         }
